@@ -1,0 +1,56 @@
+:root {
+  --bg: #0b0c0e;
+  --ink: #d9dde3;
+  --ink-dim: #8a929c;
+  --accent: #e8c27a;
+  color-scheme: dark;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px/1.45 ui-sans-serif, -apple-system, 'Helvetica Neue', sans-serif;
+  overflow: hidden;
+}
+
+#view {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+#ui {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+.fatal {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  padding: 32px;
+  text-align: center;
+  background: var(--bg);
+  pointer-events: auto;
+}
+
+.fatal h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.fatal p {
+  margin: 0;
+  max-width: 46ch;
+  color: var(--ink-dim);
+}
