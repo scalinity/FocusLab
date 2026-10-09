@@ -45,6 +45,7 @@ declare global {
       /** Starts an exposure and resolves when it has developed. */
       develop(): Promise<{ samples: number }>
       framesRendered(): number
+      renderScale(): number
       frameIntervalMs(frames: number, sweep?: boolean): Promise<number>
       /** Measures the developed disc in a square crop centred on (x, y), px. */
       measure(x: number, y: number, size: number): Promise<DiscMeasure>
@@ -142,6 +143,7 @@ function run(): Promise<HarnessReport> {
       bundles: () => view?.rays.bundles ?? [],
       ringScreenPoint: () => view?.ringScreenPoint() ?? null,
       framesRendered: () => view?.framesRendered() ?? 0,
+      renderScale: () => view?.renderScale() ?? 1,
       frameIntervalMs: (frames, sweep) => view!.frameIntervalMs(frames, sweep),
       develop: async () => {
         view!.exposeNow()

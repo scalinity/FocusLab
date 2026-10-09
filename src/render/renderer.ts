@@ -11,7 +11,6 @@ import {
   RenderTarget,
   SRGBColorSpace,
   Scene,
-  TimestampQuery,
   Vector2,
   Vector3,
   WebGPURenderer,
@@ -73,6 +72,8 @@ export interface FocusRenderer {
   exposure(): Exposure
   /** Frames actually rendered (the loop skips frames when nothing changed). */
   framesRendered(): number
+  /** Internal render scale of the live viewfinder and the bench, 0.5–1. */
+  renderScale(): number
   /**
    * Mean wall-clock interval between `frames` back-to-back live frames, ms.
    * With `sweep`, focus moves every frame, so the bench re-renders too, as
@@ -111,6 +112,12 @@ function skyNode() {
 /** GPU budget per frame for exposure samples, ms (holds ~60 fps on top of the composites). */
 const SAMPLE_BUDGET_MS = 12
 const MAX_SAMPLES_PER_FRAME = 48
+/** GPU budget for a live frame, ms; over it the internal render scale drops. */
+const LIVE_BUDGET_MS = 13
+const MIN_SCALE = 0.5
+const SCALE_STEP = 0.05
+/** Measurements in a row with room to spare before the scale steps back up. */
+const RAISE_AFTER = 20
 /** Crossfade from the live frame once this many samples exist, complete at twice that. */
 const FADE_FROM = 16
 /** Linear exposure of the viewfinder before tone mapping (aperture priority keeps it constant). */
@@ -122,7 +129,7 @@ export async function createRenderer(
   world: WorldSource,
   hud: Hud,
 ): Promise<FocusRenderer> {
-  const renderer = new WebGPURenderer({ canvas, device: gpu.device, alpha: false, antialias: false, trackTimestamp: true })
+  const renderer = new WebGPURenderer({ canvas, device: gpu.device, alpha: false, antialias: false})
   renderer.setClearColor(new Color(0x0b0f1a), 1)
   renderer.shadowMap.enabled = true
   await renderer.init()
@@ -181,7 +188,8 @@ export async function createRenderer(
   // Bench view: HDR scene → bloom → explicit tone map and output transform,
   // into its own target so exposing frames only re-composite it.
   const benchOut = new RenderTarget(1, 1, { type: HalfFloatType })
-  const benchColor = pass(scene, benchCamera).getTextureNode()
+  const benchPass = pass(scene, benchCamera)
+  const benchColor = benchPass.getTextureNode()
   const benchPipeline = new RenderPipeline(renderer)
   benchPipeline.outputColorTransform = false
   benchPipeline.outputNode = renderOutput(benchColor.add(bloom(benchColor, 0.6, 0.35, 1.6)), AgXToneMapping, SRGBColorSpace)
@@ -200,10 +208,15 @@ export async function createRenderer(
   let velocity = 0
   let frameWaiters: Array<() => void> = []
   let samplesPerFrame = 2
-  let samplesSinceResolve = 0
   let samplesLastFrame = 0
-  let resolving = false
+  /** What the last rendered frame's GPU time measures, if it has not been read yet. */
+  let gpuWork: 'none' | 'live' | 'samples' = 'none'
+  /** When the GPU last finished a frame, ms (performance.now). */
+  let lastDone = 0
   let rendered = 0
+  /** Internal render scale of the live viewfinder and the bench (the photograph is always native). */
+  let renderScale = 1
+  let underBudget = 0
 
   const markDirty = (): void => {
     benchDirty = true
@@ -231,25 +244,47 @@ export async function createRenderer(
   }
 
   /**
-   * Per-sample GPU time from timestamp queries sets how many samples fit a
-   * frame. three resolves to the last submitted frame's total, so the
-   * divisor is that frame's sample count.
+   * A frame's GPU time steers the next: while exposing, how many samples fit
+   * a frame; while live, the internal render scale. It is the span the GPU
+   * spent finishing the frame, from when its work could start (the frame's
+   * first submission, or the previous frame's completion if the GPU was still
+   * busy) to its completion (queue.onSubmittedWorkDone); the queue completes
+   * in order. Timestamp queries are not used: on Apple's tile-based GPUs
+   * consecutive passes overlap, and the sum of per-pass durations counted the
+   * same time about three times over (40 ms for frames 14 ms apart).
    */
-  function adaptSamples(): void {
-    if (resolving || samplesSinceResolve === 0 || !renderer.hasFeature('timestamp-query')) return
-    resolving = true
+  function measureGpu(frameStart: number): void {
+    const work = gpuWork
     const n = samplesLastFrame
-    samplesSinceResolve = 0
-    Promise.all([
-      renderer.resolveTimestampsAsync(TimestampQuery.RENDER),
-      renderer.resolveTimestampsAsync(TimestampQuery.COMPUTE),
-    ]).then(([r, c]) => {
-      const perSample = ((r ?? 0) + (c ?? 0)) / n
-      if (perSample > 0) {
-        samplesPerFrame = Math.max(1, Math.min(MAX_SAMPLES_PER_FRAME, Math.floor(SAMPLE_BUDGET_MS / perSample)))
-      }
-      resolving = false
+    gpuWork = 'none'
+    gpu.device.queue.onSubmittedWorkDone().then(() => {
+      const done = performance.now()
+      const ms = done - Math.max(lastDone, frameStart)
+      lastDone = done
+      if (work === 'samples') samplesPerFrame = Math.max(1, Math.min(MAX_SAMPLES_PER_FRAME, Math.floor((n * SAMPLE_BUDGET_MS) / ms)))
+      if (work === 'live') adaptScale(ms)
     })
+  }
+
+  /**
+   * GPU time is roughly proportional to pixels, i.e. to the scale squared: an
+   * over-budget frame drops the scale at once to what should fit; it steps
+   * back up only after RAISE_AFTER measurements in a row with room for the
+   * next step, so render targets are not reallocated every frame.
+   */
+  function adaptScale(ms: number): void {
+    const fit = renderScale * Math.sqrt(LIVE_BUDGET_MS / ms)
+    if (fit < renderScale - SCALE_STEP / 2) {
+      renderScale = Math.max(MIN_SCALE, Math.floor(fit / SCALE_STEP) * SCALE_STEP)
+      underBudget = 0
+    } else if (fit > renderScale + SCALE_STEP) {
+      if (++underBudget >= RAISE_AFTER) {
+        renderScale = Math.min(1, renderScale + SCALE_STEP)
+        underBudget = 0
+      }
+    } else {
+      underBudget = 0
+    }
   }
 
   let last = performance.now()
@@ -279,7 +314,15 @@ export async function createRenderer(
     const rect = viewfinderRect(innerWidth, innerHeight, ui.viewfinder)
     const W = ui.renderWidth ?? Math.max(1, Math.floor(rect.w * devicePixelRatio))
     const H = Math.max(1, Math.round((W * 2) / 3))
-    dof.resize(W, H)
+    // A fixed render width (tests) is never scaled.
+    const scale = ui.renderWidth === null ? renderScale : 1
+    const liveW = Math.max(1, Math.round(W * scale))
+    const liveH = Math.max(1, Math.round((liveW * 2) / 3))
+    if (scale !== benchPass.getResolutionScale()) {
+      benchPass.setResolutionScale(scale)
+      markDirty()
+    }
+    dof.resize(liveW, liveH)
     exposure.resize(W, H)
 
     // Anything that changes the photo discards the exposure.
@@ -308,9 +351,10 @@ export async function createRenderer(
 
     contour.strength.value = 0
     if (ex.mode === 'LIVE' && frameDirty) {
-      const u = blurUniforms(optics, W)
+      const u = blurUniforms(optics, liveW)
       dof.render(scene, vfCamera, { kPerM: u.kPerM, cocScalePx: u.cocScalePx, aperture: optics.aperture }, ui.view === 'blur' ? 'blur' : 'beauty')
       exposure.resolve(0, split)
+      gpuWork = 'live'
     } else if (ex.mode === 'EXPOSING') {
       const n = Math.min(samplesPerFrame, ex.target - ex.samples)
       exposure.renderSamples(
@@ -329,8 +373,8 @@ export async function createRenderer(
         n,
       )
       ex = addSamples(ex, n)
-      samplesSinceResolve += n
       samplesLastFrame = n
+      gpuWork = 'samples'
       exposure.resolve(ex.mode === 'DEVELOPED' ? 1 : MathUtils.smoothstep(ex.samples, FADE_FROM, 2 * FADE_FROM), split)
       // The image plane on the bench shows the photograph once it has developed.
       if (ex.mode === 'DEVELOPED') benchDirty = true
@@ -365,7 +409,7 @@ export async function createRenderer(
     renderer.setViewport(0, 0, innerWidth, innerHeight)
 
     hud.setExposure(ex)
-    adaptSamples()
+    measureGpu(now)
     rendered++
     benchDirty = false
     frameDirty = false
@@ -405,6 +449,7 @@ export async function createRenderer(
     },
     exposure: () => ex,
     framesRendered: () => rendered,
+    renderScale: () => renderScale,
     async frameIntervalMs(frames, sweep = false) {
       // Frames are re-rendered back to back (the photo stays live), so the GPU
       // stays clocked up and the interval is what someone dragging focus sees.

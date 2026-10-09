@@ -27,8 +27,10 @@ import {
   output,
   positionView,
   screenCoordinate,
+  screenUV,
   select,
   sin,
+  texture,
   textureLoad,
   uniform,
   vec2,
@@ -189,7 +191,8 @@ export function createExposureEngine(renderer: WebGPURenderer, liveTexture: Text
       const p = ivec2(screenCoordinate.xy)
       const a = buffer.element(p.y.mul(int(width)).add(p.x))
       const exact = a.rgb.div(a.w.max(1))
-      const live = textureLoad(liveTexture, p).rgb
+      // The live frame may be rendered at a lower internal scale.
+      const live = texture(liveTexture, screenUV).rgb
       const t = select(splitX.lessThan(0), fade, select(float(p.x).lessThan(splitX), float(0), float(1)))
       // The exposure only stands in where it has samples.
       return vec4(mix(live, exact, t.mul(select(a.w.greaterThan(0), float(1), float(0)))), 1)

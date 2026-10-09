@@ -102,6 +102,12 @@ async function m2(app: App): Promise<void> {
 
 async function m3perf(app: App): Promise<void> {
   const { page } = app
+  // Untimed warm-up in each viewfinder size: pipelines compile on first use,
+  // and the internal render scale settles from GPU timestamps.
+  for (const viewfinder of ['card', 'full'] as const) {
+    await page.evaluate((s) => window.__focusLab!.set(s), { f: 50, N: 2, focusM: 3, ui: { viewfinder, renderWidth: null, autoExpose: false, view: 'beauty' as const } })
+    await page.evaluate(() => window.__focusLab!.frameIntervalMs(180, true))
+  }
   for (const [label, ui, sweep] of [
     ['viewfinder card, still', { viewfinder: 'card' as const, renderWidth: null }, false],
     ['viewfinder card + bench, focus pulling', { viewfinder: 'card' as const, renderWidth: null }, true],
@@ -110,7 +116,8 @@ async function m3perf(app: App): Promise<void> {
     await page.evaluate((s) => window.__focusLab!.set(s), { f: 50, N: 2, focusM: 3, ui: { ...ui, autoExpose: false, view: 'beauty' as const } })
     const ms = await page.evaluate((s) => window.__focusLab!.frameIntervalMs(120, s), sweep)
     // The display may refresh at 120 Hz; 60 fps is the target, so allow one 60 Hz frame.
-    record(`live frame interval, ${label}`, `${ms.toFixed(2)} ms (${(1000 / ms).toFixed(0)} fps)`, '≤ 16.7 ms (60 fps)', ms <= 16.7 + 0.5)
+    const scale = await page.evaluate(() => window.__focusLab!.renderScale())
+    record(`live frame interval, ${label}`, `${ms.toFixed(2)} ms (${(1000 / ms).toFixed(0)} fps) at render scale ${scale.toFixed(2)}`, '≤ 16.7 ms (60 fps)', ms <= 16.7 + 0.5)
   }
 }
 

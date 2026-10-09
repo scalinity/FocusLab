@@ -121,8 +121,15 @@ Specs state the current design; this file is where the reasons live.
   buffer (the first sample assigns instead of adding, so no clear pass); float32 blending and
   filtering are never used. A resolve pass divides by the count and crossfades from the live
   frame between 16 and 32 samples.
-- **Samples per frame** follow the GPU timestamps: per-sample time = (render + compute ms) /
-  samples since the last resolve, budget 12 ms, at most 48 per frame.
+- **Samples per frame** follow the GPU time of the last exposing frame: count × (12 ms budget ÷
+  frame GPU time), at most 48 per frame. 512 samples at 1920×1280 develop in 2.97 s in the forest.
+- **GPU time is the span the GPU spent finishing a frame**: from when its work could start (the
+  frame's start, or the previous frame's completion if the GPU was still busy) to
+  `queue.onSubmittedWorkDone()`; the queue completes in order. Timestamp queries are not used:
+  on Apple's tile-based GPUs consecutive passes overlap, and three's per-frame sum of pass
+  durations counted the same time about three times over (40 ms reported for frames arriving
+  14 ms apart). With the sums, the sample controller under-filled frames (512 samples took
+  4.23 s) and the render scale controller saw permanent overload.
 - **The bench is rendered into its own target and re-rendered only when it changes**, so an
   exposing frame costs its samples plus two composites. Once the photo develops, the bench
   re-renders once so the image plane shows the photograph.
@@ -191,9 +198,7 @@ Specs state the current design; this file is where the reasons live.
 - **three r186 behaviours relied on or worked around:** an MRT output named `depth` is used as
   the fragment depth (the axial-depth attachment is named `viewZ`); a `NodeMaterial` with a
   `fragmentNode` ignores MRT (the prefilter uses a material-level `mrtNode`); MRT attachments
-  can carry their own clear colour (`viewZ` clears to 65504, i.e. infinitely far);
-  `resolveTimestampsAsync` returns the last frame's total, not a sum, so per-sample time is
-  divided by that frame's sample count.
+  can carry their own clear colour (`viewZ` clears to 65504, i.e. infinitely far).
 - **Acceptance (`npm run check -- m3points|m3halo|m3perf`, Apple M1 Pro, Chrome 154):** live vs
   exact blur size ×0.949–1.038 on highlights (far and near, circular and pentagonal) and
   ×1.03–1.08 on gathered edges; bokeh orientation matches in both fields; halo deviation 3.1%
@@ -231,7 +236,14 @@ Specs state the current design; this file is where the reasons live.
 - **Trees:** ez-tree geometry (vendored at `dcf309b`, MIT) for oak, ash and aspen presets,
   meshed at three detail levels from one skeleton each and instanced; the tripod never moves,
   so each instance's level is fixed by its distance.
-- **Frame time (open):** the forest misses 60 fps while focus is pulling: 12.2 ms still,
-  26.6 ms pulling focus with the bench, 21.6 ms full-screen (`npm run check -- m3perf`, M1 Pro,
-  Chrome 154). Without the undergrowth it is 10.8 / 25.6 / 21.2 ms, so the shortfall comes with
-  the forest itself, not the ferns. The adaptive internal render scale is the planned remedy.
+- **Adaptive internal render scale** (§10): the live viewfinder and the bench render at a scale
+  of 0.5–1 (the photograph always at native size; the resolve samples the live frame by UV).
+  GPU time ∝ pixels ∝ scale², so a frame over the 13 ms budget drops the scale at once to
+  what should fit; it climbs 0.05 at a time after 20 measurements in a row with room for the
+  step. A fixed render width (tests) is never scaled.
+- **Frame time (open):** in the forest the scale settles at 0.5 and frames still take 14–18 ms
+  full-screen and 20–26 ms with the bench while focus is pulling (`npm run check -- m3perf`,
+  M1 Pro, Chrome 154; repeated runs of the same build vary by up to half after long GPU load,
+  so single figures are not compared). Most of the cost does not scale with pixels: the whole
+  forest is drawn for the viewfinder, the bench and three shadow cascades, though a 50 mm lens
+  sees about a ninth of it. Per-instance culling is the remedy.
