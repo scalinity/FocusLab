@@ -126,7 +126,7 @@ Specs state the current design; this file is where the reasons live.
 ## Live depth of field (M3)
 
 - **Structure:** MRT scene pass (HDR colour + axial view-space depth) → half-res prefilter into
-  three fields → compute tile classification with the near field dilated → far gather, near
+  three fields → compute tiles of the largest near blur, dilated → far gather, near
   gather → alpha-weighted 3×3 fill → highlight scatter (compute append, indirect
   aperture-polygon sprites) → full-res composite → FXAA. DoF runs on linear HDR before any
   tone mapping; the viewfinder card tone-maps last.
@@ -146,7 +146,13 @@ Specs state the current design; this file is where the reasons live.
   neighbours' (a near bead and far sky average to no blur), which broke both the reach test
   and the highlight split.
 - **Far gather:** a farther sample's blur is limited to the centre's own (it cannot spread over
-  something nearer). **Near gather:** never limited; alpha = Σ coverage·weight · R²/n.
+  something nearer), and a nearer far-field sample blurs less than the centre, so nothing
+  reaches past the centre's own blur: the far gather samples within that radius, not a tile
+  maximum. Sampling a tile's largest blur left a slightly defocused subject in front of a
+  heavily blurred background almost unsampled (~0.5 of 64 samples on a 9 px mushroom cap
+  against a 128 px background), which showed as black specks and seams on tile boundaries.
+  **Near gather:** never limited, so it samples the dilated tile radius; alpha = Σ
+  coverage·weight · R²/n.
 - **Background behind near objects:** at near-field centres the far pass estimates what lies
   farther than the centre (far and in-focus fields plus clearly less-blurred near samples),
   so foreground blur composites over what a lens sees past its edge, not over its own sharp
@@ -170,7 +176,7 @@ Specs state the current design; this file is where the reasons live.
 - **Acceptance (`npm run check -- m3points|m3halo|m3perf`, Apple M1 Pro, Chrome 154):** live vs
   exact blur size ×0.949–1.038 on highlights (far and near, circular and pentagonal) and
   ×1.03–1.08 on gathered edges; bokeh orientation matches in both fields; halo deviation 3.1%
-  (sharp over blur) and 2.8% (blur over sharp) of edge contrast at the 5 px scale. Live frame
+  (sharp over blur) and 2.5% (blur over sharp) of edge contrast at the 5 px scale. Live frame
   interval on the test cards: 8.3 ms still, 12.2 ms while pulling focus with the bench, 15.4 ms
   full-screen at 1794 px while pulling focus. The forest will need the adaptive render scale.
 
@@ -208,6 +214,3 @@ Specs state the current design; this file is where the reasons live.
   26.6 ms pulling focus with the bench, 21.6 ms full-screen (`npm run check -- m3perf`, M1 Pro,
   Chrome 154). Without the undergrowth it is 10.8 / 25.6 / 21.2 ms, so the shortfall comes with
   the forest itself, not the ferns. The adaptive internal render scale is the planned remedy.
-- **Live DoF on forest content (open):** an in-focus mushroom cap against a background blurred
-  ~170 px shows black specks, a stair-stepped outline and seams on 16 px tile boundaries in the
-  live view; the exact exposure of the same state is clean.

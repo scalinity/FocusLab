@@ -65,7 +65,7 @@ import { fxaa } from 'three/addons/tsl/display/FXAANode.js'
  *
  *   scene (MRT: HDR colour, axial depth; one sample per pixel)
  *   → prefilter (half res, three fields: far, near, in focus)
- *   → tiles (compute: max far / near CoC per 16 px tile, near dilated)
+ *   → tiles (compute: largest near blur per 16 px tile, dilated)
  *   → far gather (+ background estimate behind near objects), near gather
  *   → highlight scatter (compute append → indirect aperture-polygon sprites)
  *   → composite (full res: sharp → far → near)
@@ -214,8 +214,8 @@ export function createLiveDof(renderer: WebGPURenderer): LiveDof {
   })
   const prefilterQuad = new QuadMesh(prefilterMat)
 
-  // Tiles: [min near CoC, max far CoC, near radius, far radius] (radii in half-res px).
-  let tiles = instancedArray(1, 'vec4')
+  // Tiles: [min near CoC, near radius] (radius in half-res px).
+  let tiles = instancedArray(1, 'vec2')
   let nearDilated = instancedArray(1, 'float')
   let tileKernel: ReturnType<typeof buildTileKernels> | null = null
 
@@ -226,15 +226,13 @@ export function createLiveDof(renderer: WebGPURenderer): LiveDof {
       const t = instanceIndex
       const origin = uvec2(t.mod(tilesX), t.div(tilesX)).mul(TILE)
       const nearMin = float(0).toVar()
-      const farMax = float(0).toVar()
       Loop({ start: 0, end: TILE, type: 'int' }, { start: 0, end: TILE, type: 'int' }, ({ i, j }) => {
         // Clamp to the last texel for tiles that overhang the image edge.
         const q = ivec2(min(vec2(origin.add(uvec2(uint(i), uint(j)))), halfSize.sub(1)))
         const c = textureLoad(fieldsRT.textures[COC], q)
-        farMax.assign(max(farMax, c.r))
         nearMin.assign(min(nearMin, c.g))
       })
-      tileBuf.element(t).assign(vec4(nearMin, farMax, nearMin.negate().div(4), farMax.div(4)))
+      tileBuf.element(t).assign(vec2(nearMin, nearMin.negate().div(4)))
     })().compute(tx * ty, [64])
 
     const reach = Math.ceil(MAX_RADIUS_HALF / TILE)
@@ -250,7 +248,7 @@ export function createLiveDof(renderer: WebGPURenderer): LiveDof {
           const nx = tx0.add(i)
           const ny = ty0.add(j)
           If(nx.greaterThanEqual(0).and(ny.greaterThanEqual(0)).and(nx.lessThan(int(tilesX))).and(ny.lessThan(ty)), () => {
-            const r = tileBuf.element(ny.mul(int(tilesX)).add(nx)).z
+            const r = tileBuf.element(ny.mul(int(tilesX)).add(nx)).y
             // A neighbour's near blur can reach this tile if its radius spans the gap.
             const gap = max(abs(float(i)), abs(float(j))).sub(1).max(0).mul(TILE)
             If(r.greaterThanEqual(gap), () => best.assign(max(best, r)))
@@ -296,11 +294,16 @@ export function createLiveDof(renderer: WebGPURenderer): LiveDof {
       const centerNear = textureLoad(fieldsRT.textures[NEAR], ivec2(pix))
       const centerCoc = textureLoad(fieldsRT.textures[COC], ivec2(pix))
       const start = poolStart()
-      const R = tiles.element(tileOf()).w.min(MAX_RADIUS_HALF)
       const result = vec4(0).toVar()
-      If(centerFar.a.greaterThan(1e-3).and(R.greaterThan(0.5)), () => {
+      If(centerFar.a.greaterThan(1e-3), () => {
         const cc = centerCoc.r
         const rc = cc.div(4).min(MAX_RADIUS_HALF)
+        // No far sample reaches past the centre's own blur: nearer far-field
+        // samples blur less, farther ones are limited to it. Sampling a wider
+        // radius would spend the kernel where nothing can contribute, and a
+        // slightly blurred subject in front of a heavily blurred background
+        // would go almost unsampled (black specks, seams on tile boundaries).
+        const R = rc.max(1)
         const sum = vec3(0).toVar()
         const cov = float(0).toVar()
         const n = sampleCount(R)
@@ -556,7 +559,7 @@ export function createLiveDof(renderer: WebGPURenderer): LiveDof {
       const tx = Math.ceil(w / TILE)
       const ty = Math.ceil(h / TILE)
       tilesX.value = tx
-      tiles = instancedArray(tx * ty, 'vec4')
+      tiles = instancedArray(tx * ty, 'vec2')
       nearDilated = instancedArray(tx * ty, 'float')
       tileKernel = buildTileKernels(tx, ty)
       extract = buildExtract()
