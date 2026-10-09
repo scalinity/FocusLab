@@ -122,3 +122,54 @@ Specs state the current design; this file is where the reasons live.
   moment, because a 5-fold symmetric shape has no skew.
 - Exposure is a fixed multiplier until the exposure chain lands with the forest (M4). Scene
   time and shadow maps must freeze while exposing once the world animates.
+
+## Live depth of field (M3)
+
+- **Structure:** MRT scene pass (HDR colour + axial view-space depth) → half-res prefilter into
+  three fields → compute tile classification with the near field dilated → far gather, near
+  gather → alpha-weighted 3×3 fill → highlight scatter (compute append, indirect
+  aperture-polygon sprites) → full-res composite → FXAA. DoF runs on linear HDR before any
+  tone mapping; the viewfinder card tone-maps last.
+- **Field separation at the downsample.** Each half-res texel keeps the far, near and in-focus
+  parts of its 2×2 block as separate premultiplied colours with coverage (split smoothly by each
+  sample's CoC between 1 and 4 px). Averaging a block across an in-focus edge lends the edge's
+  colour to the background blur (a measured dark fringe of 9% over the blur radius before
+  this), and partial near texels now give partial alpha, i.e. coverage-correct soft edges.
+- **Each field's CoC is luminance-weighted**: it sets how far the field's energy spreads, so it
+  follows the surface the energy comes from. A plain average of a bead against the sky
+  describes neither surface (it scattered highlights at twice their size).
+- **No MSAA in the scene pass; FXAA instead.** A resolved depth averages surfaces across a
+  silhouette, which gave edge pixels a blur belonging to neither surface. FXAA runs on a log
+  encoding (log₂(1 + c)/16) because it detects edges by luma contrast and needs perceptually
+  spaced values; log keeps half-float precision over 16 stops.
+- **Every CoC and coverage read is point-sampled.** Bilinear taps blend a texel's CoC with its
+  neighbours' (a near bead and far sky average to no blur), which broke both the reach test
+  and the highlight split.
+- **Far gather:** a farther sample's blur is limited to the centre's own (it cannot spread over
+  something nearer). **Near gather:** never limited; alpha = Σ coverage·weight · R²/n.
+- **Background behind near objects:** at near-field centres the far pass estimates what lies
+  farther than the centre (far and in-focus fields plus clearly less-blurred near samples),
+  so foreground blur composites over what a lens sees past its edge, not over its own sharp
+  image.
+- **Gather sampling:** 64 of a 256-point R2 pool, each pixel reading its own window (shape kept,
+  structured undersampling turned into fine noise), then an alpha-weighted 3×3 fill.
+- **Highlights:** the part of a blurred field above linear luminance 8 is scattered when its
+  blur is at least 4 px; the gathered part is clamped to that level, so no light is counted
+  twice. Sprite intensity is energy ÷ area of the area-equivalent disc.
+- **Kernel cap:** 32 half-res px = 64 full-res px radius (a 128 px blur circle). Beyond that the
+  live view understates blur; the exact exposure has no cap.
+- **Temporal stabilisation is deferred to M4**, where the first moving content (wind) arrives;
+  with a static tripod and static test scenes there is nothing to stabilise, and focus pulls
+  change every pixel each frame (history would only ghost).
+- **three r186 behaviours relied on or worked around:** an MRT output named `depth` is used as
+  the fragment depth (the axial-depth attachment is named `viewZ`); a `NodeMaterial` with a
+  `fragmentNode` ignores MRT (the prefilter uses a material-level `mrtNode`); MRT attachments
+  can carry their own clear colour (`viewZ` clears to 65504, i.e. infinitely far);
+  `resolveTimestampsAsync` returns the last frame's total, not a sum, so per-sample time is
+  divided by that frame's sample count.
+- **Acceptance (`npm run check -- m3points|m3halo|m3perf`, Apple M1 Pro, Chrome 154):** live vs
+  exact blur size ×0.949–1.038 on highlights (far and near, circular and pentagonal) and
+  ×1.03–1.08 on gathered edges; bokeh orientation matches in both fields; halo deviation 3.1%
+  (sharp over blur) and 2.8% (blur over sharp) of edge contrast at the 5 px scale. Live frame
+  interval on the test cards: 8.3 ms still, 12.2 ms while pulling focus with the bench, 15.4 ms
+  full-screen at 1794 px while pulling focus. The forest will need the adaptive render scale.

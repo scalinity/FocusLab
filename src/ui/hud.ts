@@ -126,17 +126,30 @@ export function createHud(world: WorldSource): Hud {
   row1.append(gFocus.root, gDistance.root)
   const row2 = el('div', 'row')
   row2.append(gAperture.root, gLens.root, tools)
-  ctl.append(row1, row2)
+  const VIEWS = ['beauty', 'blur', 'split'] as const
+  const viewSeg = segmented(
+    [
+      { label: 'Beauty', value: 0 },
+      { label: 'Blur map', value: 1 },
+      { label: 'Live | exact', value: 2 },
+    ],
+    (i) => store.setUi({ view: VIEWS[i] }),
+  )
+  const gView = group('View', viewSeg.root)
+  const row3 = el('div', 'row')
+  row3.append(gView.root)
+  ctl.append(row1, row2, row3)
 
   // Viewfinder frame and 3D-anchored labels
   const vf = el('div', 'vf-frame')
   const vfTag = el('span', 'tag')
+  const divider = el('div', 'divider', '<span>live</span><span>exact</span>')
   const progress = el(
     'div',
     'progress',
     '<svg viewBox="0 0 20 20"><circle class="bg" cx="10" cy="10" r="8"/><circle class="fg" cx="10" cy="10" r="8"/></svg>',
   )
-  vf.append(vfTag, progress)
+  vf.append(vfTag, progress, divider)
   const progressArc = progress.querySelector<SVGCircleElement>('.fg')!
   let lastTag = ''
   const pills = {
@@ -181,6 +194,8 @@ export function createHud(world: WorldSource): Hud {
     presetSeg.select(preset >= 0 ? preset : null)
     labBtn.classList.toggle('on', o.lab)
     autoBtn.classList.toggle('on', s.ui.autoExpose)
+    viewSeg.select(VIEWS.indexOf(s.ui.view))
+    divider.hidden = s.ui.view !== 'split'
     vfBtn.classList.toggle('on', s.ui.viewfinder === 'full')
     ui.classList.toggle('off', s.ui.hidden)
     ui.classList.toggle('vf-full', s.ui.viewfinder === 'full')

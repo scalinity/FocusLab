@@ -576,3 +576,38 @@ button:focus-visible,
   transform-origin: 50% 50%;
   filter: drop-shadow(0 0 3px #7fe3ff99);
 }
+
+/* Live | exact divider on the viewfinder */
+.vf-frame .divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: #ffffffa0;
+  box-shadow: 0 0 6px #000a;
+}
+
+.vf-frame .divider[hidden] {
+  display: none;
+}
+
+.vf-frame .divider span {
+  position: absolute;
+  top: 8px;
+  font: 500 10px/1 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #fff;
+  background: #0b1020c0;
+  padding: 3px 6px;
+  border-radius: 6px;
+}
+
+.vf-frame .divider span:first-child {
+  right: 8px;
+}
+
+.vf-frame .divider span:last-child {
+  left: 8px;
+}

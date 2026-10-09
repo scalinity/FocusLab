@@ -7,9 +7,10 @@ import {
   Vector3,
   type ComputeNode,
   type Scene,
+  type Texture,
   type WebGPURenderer,
 } from 'three/webgpu'
-import { Fn, instanceIndex, instancedArray, int, ivec2, mix, screenCoordinate, select, textureLoad, uniform, uvec2, vec4 } from 'three/tsl'
+import { Fn, float, instanceIndex, instancedArray, int, ivec2, mix, screenCoordinate, select, textureLoad, uniform, uvec2, vec4 } from 'three/tsl'
 import { sampleAperture, type Aperture } from '../optics/aperture'
 import { halton, r2 } from '../optics/sequence'
 
@@ -55,24 +56,27 @@ export interface ExposureEngine {
   /** HDR image the viewfinder shows (live or the developing exposure). */
   image: RenderTarget
   resize(width: number, height: number): void
-  renderLive(scene: Scene, camera: PerspectiveCamera): void
   /** Renders and accumulates samples [start, start + count). */
   renderSamples(scene: Scene, base: PerspectiveCamera, o: SampleOptics, start: number, count: number): void
-  /** Writes `image` as a mix of the live frame and the exposure (0 → 1). */
-  resolve(fade: number): void
+  /**
+   * Writes `image` as a mix of the live frame and the exposure (0 → 1). With
+   * `split` (0…1) the live frame fills the left of that line and the exposure
+   * the right, to show where the live approximation departs from the truth.
+   */
+  resolve(fade: number, split?: number | null): void
   readAccumulation(): Promise<{ data: Float32Array; width: number; height: number }>
   dispose(): void
 }
 
-export function createExposureEngine(renderer: WebGPURenderer): ExposureEngine {
+export function createExposureEngine(renderer: WebGPURenderer, liveTexture: Texture): ExposureEngine {
   let W = 0
   let H = 0
-  const live = new RenderTarget(1, 1, { type: HalfFloatType, samples: 4 })
   const sample = new RenderTarget(1, 1, { type: HalfFloatType })
   const image = new RenderTarget(1, 1, { type: HalfFloatType })
   const width = uniform(1, 'uint')
   const first = uniform(1, 'uint')
   const fade = uniform(0)
+  const splitX = uniform(-1)
 
   let accum = instancedArray(1, 'vec4')
   let accumulate: ComputeNode | null = null
@@ -98,7 +102,10 @@ export function createExposureEngine(renderer: WebGPURenderer): ExposureEngine {
       const p = ivec2(screenCoordinate.xy)
       const a = buffer.element(p.y.mul(int(width)).add(p.x))
       const exact = a.rgb.div(a.w.max(1))
-      return vec4(mix(textureLoad(live.texture, p).rgb, exact, fade), 1)
+      const live = textureLoad(liveTexture, p).rgb
+      const t = select(splitX.lessThan(0), fade, select(float(p.x).lessThan(splitX), float(0), float(1)))
+      // The exposure only stands in where it has samples.
+      return vec4(mix(live, exact, t.mul(select(a.w.greaterThan(0), float(1), float(0)))), 1)
     })()
     resolveMaterial.needsUpdate = true
   }
@@ -109,14 +116,9 @@ export function createExposureEngine(renderer: WebGPURenderer): ExposureEngine {
       if (w === W && h === H) return
       W = w
       H = h
-      for (const t of [live, sample, image]) t.setSize(w, h)
+      for (const t of [sample, image]) t.setSize(w, h)
       width.value = w
       build()
-    },
-    renderLive(scene, cam) {
-      renderer.setRenderTarget(live)
-      renderer.render(scene, cam)
-      renderer.setRenderTarget(null)
     },
     renderSamples(scene, base, o, start, count) {
       base.updateMatrixWorld()
@@ -149,8 +151,9 @@ export function createExposureEngine(renderer: WebGPURenderer): ExposureEngine {
         renderer.compute(accumulate!)
       }
     },
-    resolve(f) {
+    resolve(f, split = null) {
       fade.value = f
+      splitX.value = split === null ? -1 : split * W
       renderer.setRenderTarget(image)
       resolveQuad.render(renderer)
       renderer.setRenderTarget(null)
@@ -160,7 +163,7 @@ export function createExposureEngine(renderer: WebGPURenderer): ExposureEngine {
       return { data: new Float32Array(buf), width: W, height: H }
     },
     dispose() {
-      for (const t of [live, sample, image]) t.dispose()
+      for (const t of [sample, image]) t.dispose()
       resolveMaterial.dispose()
     },
   }

@@ -1,6 +1,7 @@
 import {
   AgXToneMapping,
   Color,
+  DataUtils,
   Group,
   HalfFloatType,
   MathUtils,
@@ -25,7 +26,7 @@ import { LENS_WORLD, chooseSubjects, imageScale } from '../bench/geometry'
 import { createRayView, type RayView } from '../bench/rays'
 import { stepSpring } from '../optics/spring'
 import { maxSensorDistance } from '../optics/travel'
-import { apertureRadiusM, mmToMetres } from '../optics/world'
+import { apertureRadiusM, blurUniforms, mmToMetres } from '../optics/world'
 import {
   TIER_SAMPLES,
   addSamples,
@@ -39,6 +40,7 @@ import { store } from '../state/store'
 import type { Hud, LabelPositions } from '../ui/hud'
 import type { WorldSource } from '../worlds/WorldSource'
 import { createExposureEngine } from './exposure'
+import { createLiveDof } from './dofLive'
 import { contour } from './focusContour'
 import { viewfinderRect } from './layout'
 
@@ -70,7 +72,15 @@ export interface FocusRenderer {
   exposure(): Exposure
   /** Frames actually rendered (the loop skips frames when nothing changed). */
   framesRendered(): number
+  /**
+   * Mean wall-clock interval between `frames` back-to-back live frames, ms.
+   * With `sweep`, focus moves every frame, so the bench re-renders too, as
+   * while someone drags the focus ring.
+   */
+  frameIntervalMs(frames: number, sweep?: boolean): Promise<number>
   readAccumulation(): Promise<{ data: Float32Array; width: number; height: number }>
+  /** The live DoF image as RGBA float, rows top to bottom. */
+  readLive(): Promise<{ data: Float32Array; width: number; height: number }>
   /** Screen position (CSS px) of the ring point facing the bench camera, for the harness. */
   ringScreenPoint(): { x: number; y: number } | null
   resetView(): void
@@ -123,7 +133,8 @@ export async function createRenderer(
   const pmrem = new PMREMGenerator(renderer)
   const env = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
 
-  const exposure = createExposureEngine(renderer)
+  const dof = createLiveDof(renderer)
+  const exposure = createExposureEngine(renderer, dof.output.texture)
   const vfCamera = new PerspectiveCamera(30, 1.5, 0.02, 3000)
   vfCamera.position.set(LENS_WORLD.x, LENS_WORLD.y, LENS_WORLD.z)
   vfCamera.layers.set(0)
@@ -175,6 +186,7 @@ export async function createRenderer(
   let frameWaiters: Array<() => void> = []
   let samplesPerFrame = 2
   let samplesSinceResolve = 0
+  let samplesLastFrame = 0
   let resolving = false
   let rendered = 0
 
@@ -203,11 +215,15 @@ export async function createRenderer(
     return { x: ((v.x + 1) / 2) * innerWidth, y: ((1 - v.y) / 2) * innerHeight }
   }
 
-  /** Per-sample GPU time from timestamp queries sets how many samples fit a frame. */
+  /**
+   * Per-sample GPU time from timestamp queries sets how many samples fit a
+   * frame. three resolves to the last submitted frame's total, so the
+   * divisor is that frame's sample count.
+   */
   function adaptSamples(): void {
     if (resolving || samplesSinceResolve === 0 || !renderer.hasFeature('timestamp-query')) return
     resolving = true
-    const n = samplesSinceResolve
+    const n = samplesLastFrame
     samplesSinceResolve = 0
     Promise.all([
       renderer.resolveTimestampsAsync(TimestampQuery.RENDER),
@@ -248,16 +264,19 @@ export async function createRenderer(
     const rect = viewfinderRect(innerWidth, innerHeight, ui.viewfinder)
     const W = ui.renderWidth ?? Math.max(1, Math.floor(rect.w * devicePixelRatio))
     const H = Math.max(1, Math.round((W * 2) / 3))
+    dof.resize(W, H)
     exposure.resize(W, H)
 
     // Anything that changes the photo discards the exposure.
     const ap = optics.aperture
-    const key = [optics.f, optics.N, optics.si, ap.blades, ap.roundness, ap.rotation, W, H].join('|')
+    const key = [optics.f, optics.N, optics.si, ap.blades, ap.roundness, ap.rotation, W, H, ui.view].join('|')
     if (key !== photoKey) {
       photoKey = key
       ex = onInput(ex, now)
     }
-    ex = { ...tick(ex, now, ui.autoExpose && !document.hidden), target: TIER_SAMPLES[ui.tier] }
+    // The blur map is a diagnostic of the live path; it never exposes.
+    ex = { ...tick(ex, now, ui.autoExpose && ui.view !== 'blur' && !document.hidden), target: TIER_SAMPLES[ui.tier] }
+    const split = ui.view === 'split' ? 0.5 : null
     if (!benchDirty && !frameDirty && ex.mode !== 'EXPOSING') return
 
     hud.placeViewfinder(rect)
@@ -270,8 +289,9 @@ export async function createRenderer(
 
     contour.strength.value = 0
     if (ex.mode === 'LIVE' && frameDirty) {
-      exposure.renderLive(scene, vfCamera)
-      exposure.resolve(0)
+      const u = blurUniforms(optics, W)
+      dof.render(scene, vfCamera, { kPerM: u.kPerM, cocScalePx: u.cocScalePx, aperture: optics.aperture }, ui.view === 'blur' ? 'blur' : 'beauty')
+      exposure.resolve(0, split)
     } else if (ex.mode === 'EXPOSING') {
       const n = Math.min(samplesPerFrame, ex.target - ex.samples)
       exposure.renderSamples(
@@ -289,7 +309,8 @@ export async function createRenderer(
       )
       ex = addSamples(ex, n)
       samplesSinceResolve += n
-      exposure.resolve(ex.mode === 'DEVELOPED' ? 1 : MathUtils.smoothstep(ex.samples, FADE_FROM, 2 * FADE_FROM))
+      samplesLastFrame = n
+      exposure.resolve(ex.mode === 'DEVELOPED' ? 1 : MathUtils.smoothstep(ex.samples, FADE_FROM, 2 * FADE_FROM), split)
       // The image plane on the bench shows the photograph once it has developed.
       if (ex.mode === 'DEVELOPED') benchDirty = true
     }
@@ -363,7 +384,30 @@ export async function createRenderer(
     },
     exposure: () => ex,
     framesRendered: () => rendered,
+    async frameIntervalMs(frames, sweep = false) {
+      // Frames are re-rendered back to back (the photo stays live), so the GPU
+      // stays clocked up and the interval is what someone dragging focus sees.
+      await frame()
+      const t0 = performance.now()
+      const base = store.get().optics.si
+      for (let i = 0; i < frames; i++) {
+        if (sweep) {
+          const si = base + 0.002 * Math.sin(i / 8)
+          store.setOptics({ si, siTarget: si })
+        }
+        await frame()
+      }
+      if (sweep) store.setOptics({ si: base, siTarget: base })
+      return (performance.now() - t0) / frames
+    },
     readAccumulation: () => exposure.readAccumulation(),
+    async readLive() {
+      const { width, height } = dof.output
+      const raw = (await renderer.readRenderTargetPixelsAsync(dof.output, 0, 0, width, height)) as Uint16Array
+      const data = new Float32Array(raw.length)
+      for (let i = 0; i < raw.length; i++) data[i] = DataUtils.fromHalfFloat(raw[i])
+      return { data, width, height }
+    },
     ringScreenPoint() {
       // The point of the ring (centred on the axis) that faces the bench camera.
       const r = bench.ring
@@ -383,6 +427,7 @@ export async function createRenderer(
       bench.dispose()
       rays.dispose()
       exposure.dispose()
+      dof.dispose()
       for (const p of [benchPipeline, blitPipeline, cardPipeline]) p.dispose()
       benchOut.dispose()
       env.dispose()

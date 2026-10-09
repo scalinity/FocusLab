@@ -15,6 +15,8 @@ export interface UiState {
   /** Develop the exact exposure after a pause without input. */
   autoExpose: boolean
   tier: 'low' | 'high' | 'ultra'
+  /** Beauty, the false-colour blur map, or live | exact side by side. */
+  view: 'beauty' | 'blur' | 'split'
   /** Fixed viewfinder render width in px (tests); null follows the card. */
   renderWidth: number | null
 }
@@ -62,5 +64,5 @@ const si = sensorDistance(50, metresToMm(3))
 /** Default: 50 mm at f/2, focused at 3 m, circular iris. */
 export const store = createStore(
   { f: 50, N: 2, si, siTarget: si, lab: false, aperture: CIRCULAR },
-  { viewfinder: 'card', hidden: false, autoExpose: true, tier: 'high', renderWidth: null },
+  { viewfinder: 'card', hidden: false, autoExpose: true, tier: 'high', view: 'beauty', renderWidth: null },
 )

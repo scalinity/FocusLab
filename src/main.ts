@@ -10,6 +10,7 @@ import { bindInput } from './ui/input'
 import { showFatal } from './ui/fatal'
 import { createTestCards } from './worlds/testCards'
 import { createPointTargets } from './worlds/pointTargets'
+import { createHaloTargets } from './worlds/haloTargets'
 import { measureDisc, type DiscMeasure } from './render/measure'
 
 const canvas = document.getElementById('view') as HTMLCanvasElement
@@ -42,8 +43,13 @@ declare global {
       /** Starts an exposure and resolves when it has developed. */
       develop(): Promise<{ samples: number }>
       framesRendered(): number
+      frameIntervalMs(frames: number, sweep?: boolean): Promise<number>
       /** Measures the developed disc in a square crop centred on (x, y), px. */
       measure(x: number, y: number, size: number): Promise<DiscMeasure>
+      /** The same measurement on the live depth-of-field image. */
+      measureLive(x: number, y: number, size: number): Promise<DiscMeasure>
+      /** Luminance averaged over rows [y0, y1) for each column in [x0, x1). */
+      profile(source: 'live' | 'exact', x0: number, x1: number, y0: number, y1: number): Promise<number[]>
     }
   }
 }
@@ -54,7 +60,8 @@ let unbind: (() => void) | null = null
 // Canvas textures (chart labels, the ring scale) are drawn once; wait for the
 // bundled fonts so they use them.
 await Promise.all([document.fonts.load('600 46px "Outfit Variable"'), document.fonts.load('500 30px "DM Mono"')])
-const world = new URLSearchParams(location.search).get('world') === 'points' ? createPointTargets() : createTestCards()
+const worldName = new URLSearchParams(location.search).get('world')
+const world = worldName === 'points' ? createPointTargets() : worldName === 'halo' ? createHaloTargets() : createTestCards()
 const hud = createHud(world)
 
 /**
@@ -127,20 +134,27 @@ function run(): Promise<HarnessReport> {
       bundles: () => view?.rays.bundles ?? [],
       ringScreenPoint: () => view?.ringScreenPoint() ?? null,
       framesRendered: () => view?.framesRendered() ?? 0,
+      frameIntervalMs: (frames, sweep) => view!.frameIntervalMs(frames, sweep),
       develop: async () => {
         view!.exposeNow()
         await view!.developed()
         return { samples: view!.exposure().samples }
       },
-      measure: async (x, y, size) => {
-        const { data, width } = await view!.readAccumulation()
-        const crop = new Float32Array(size * size * 4)
-        const x0 = Math.round(x - size / 2)
-        const y0 = Math.round(y - size / 2)
-        for (let r = 0; r < size; r++) {
-          crop.set(data.subarray(((y0 + r) * width + x0) * 4, ((y0 + r) * width + x0 + size) * 4), r * size * 4)
+      measure: async (x, y, size) => measureCrop(await view!.readAccumulation(), x, y, size),
+      measureLive: async (x, y, size) => measureCrop(await view!.readLive(), x, y, size),
+      profile: async (source, x0, x1, y0, y1) => {
+        const img = source === 'live' ? await view!.readLive() : await view!.readAccumulation()
+        const out: number[] = []
+        for (let x = Math.round(x0); x < Math.round(x1); x++) {
+          let sum = 0
+          for (let y = Math.round(y0); y < Math.round(y1); y++) {
+            const i = (y * img.width + x) * 4
+            const w = img.data[i + 3] || 1
+            sum += (0.2126 * img.data[i] + 0.7152 * img.data[i + 1] + 0.0722 * img.data[i + 2]) / w
+          }
+          out.push(sum / (Math.round(y1) - Math.round(y0)))
         }
-        return measureDisc(crop, size, size)
+        return out
       },
     }
   }
@@ -148,3 +162,14 @@ function run(): Promise<HarnessReport> {
 }
 
 run()
+
+function measureCrop(img: { data: Float32Array; width: number }, x: number, y: number, size: number): DiscMeasure {
+  const crop = new Float32Array(size * size * 4)
+  const x0 = Math.round(x - size / 2)
+  const y0 = Math.round(y - size / 2)
+  for (let r = 0; r < size; r++) {
+    const start = ((y0 + r) * img.width + x0) * 4
+    crop.set(img.data.subarray(start, start + size * 4), r * size * 4)
+  }
+  return measureDisc(crop, size, size)
+}
