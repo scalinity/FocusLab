@@ -1,7 +1,6 @@
 import {
   DoubleSide,
   Group,
-  InstancedMesh,
   Matrix4,
   MeshStandardNodeMaterial,
   Quaternion,
@@ -14,13 +13,15 @@ import { LENS_WORLD } from '../../bench/geometry'
 import { focusContour } from '../../render/focusContour'
 import type { PbrSet } from './assets'
 import { rng } from './noise'
+import { batch } from './batch'
 import { groundHeight } from './terrain'
 
 /**
  * The forest's trees: ez-tree skeletons for a few deciduous species, each
  * meshed at three levels of detail from one skeleton (identical silhouettes,
- * so a level change never pops), instanced across the forest. The tripod never
- * moves, so each instance's level is fixed by its distance once.
+ * so a level change never pops), batched across the forest and culled per tree
+ * for every view (see batch.ts). The tripod never moves, so each instance's
+ * level is fixed by its distance once.
  */
 
 /** ez-tree units → metres (its large oak trunk is ~48 units). */
@@ -140,32 +141,25 @@ export function createTrees(
   const barkMat = barkMaterial(bark, moss)
   const leafMat = leafMaterial(leaves)
 
-  const m = new Matrix4()
+  // Geometry k = variant · LODS.length + level; each tree's level is fixed by its distance.
+  const branchGeometries = variants.flatMap((v) => v.lods.map((l) => l.branches))
+  const leafGeometries = variants.flatMap((v) => v.lods.map((l) => l.leaves))
+  const branches: Array<{ geometry: number; matrix: Matrix4 }> = []
+  const nearLeaves: typeof branches = []
+  const farLeaves: typeof branches = []
   const q = new Quaternion()
   const up = new Vector3(0, 1, 0)
-  variants.forEach((v, vi) => {
-    LODS.forEach((lod, li) => {
-      const mine = placements.filter((p) => {
-        const d = Math.hypot(p.x, p.z)
-        return p.variant === vi && d <= lod.maxDistance && d > (li === 0 ? 0 : LODS[li - 1].maxDistance)
-      })
-      if (mine.length === 0) return
-      for (const [geometry, material, shadow] of [
-        [v.lods[li].branches, barkMat, true],
-        [v.lods[li].leaves, leafMat, li < 2],
-      ] as const) {
-        const mesh = new InstancedMesh(geometry, material, mine.length)
-        mine.forEach((p, i) => {
-          q.setFromAxisAngle(up, p.rotation)
-          m.compose(new Vector3(p.x, groundHeight(p.x, p.z) - 0.15, p.z), q, new Vector3(p.scale, p.scale, p.scale))
-          mesh.setMatrixAt(i, m)
-        })
-        mesh.castShadow = shadow
-        mesh.receiveShadow = true
-        mesh.frustumCulled = false
-        group.add(mesh)
-      }
-    })
-  })
+  for (const p of placements) {
+    const level = LODS.findIndex((l) => Math.hypot(p.x, p.z) <= l.maxDistance)
+    const geometry = p.variant * LODS.length + level
+    q.setFromAxisAngle(up, p.rotation)
+    const matrix = new Matrix4().compose(new Vector3(p.x, groundHeight(p.x, p.z) - 0.15, p.z), q, new Vector3().setScalar(p.scale))
+    branches.push({ geometry, matrix })
+    ;(level < 2 ? nearLeaves : farLeaves).push({ geometry, matrix })
+  }
+  // The farthest level's leaves are billboards and cast no shadow.
+  const far = batch(leafGeometries, farLeaves, leafMat)
+  far.castShadow = false
+  group.add(batch(branchGeometries, branches, barkMat), batch(leafGeometries, nearLeaves, leafMat), far)
   return group
 }

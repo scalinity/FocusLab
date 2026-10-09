@@ -229,21 +229,28 @@ Specs state the current design; this file is where the reasons live.
   7.2 m. These are the world's subjects for the bench and the presets. Mushrooms and the trunk
   are procedural (no CC0 mushroom model exists); lathe profiles run bottom to top so faces
   point outwards.
-- **Undergrowth:** the `fern_02` model holds four variants on a 1 m grid; each is one
-  instanced draw (688 instances), scattered on a jittered grid whose cells grow with distance,
-  masked by noise into clumps, kept to a wedge wider than the 24 mm view, clear of the
-  composed foreground and the trunks. Cost: ~1 ms per frame.
+- **Undergrowth:** the `fern_02` model holds four variants on a 1 m grid; each is instanced
+  (688 instances), scattered on a jittered grid whose cells grow with distance, masked by noise
+  into clumps, kept to a wedge wider than the 24 mm view, clear of the composed foreground and
+  the trunks. Ferns farther than 20 m cast no shadow (their shadows are too small to see, and
+  cost their triangles once more per cascade). They stay instanced, not batched: nearly all lie
+  in the view, so per-fern culling only turns 4 draws into ~700.
 - **Trees:** ez-tree geometry (vendored at `dcf309b`, MIT) for oak, ash and aspen presets,
-  meshed at three detail levels from one skeleton each and instanced; the tripod never moves,
-  so each instance's level is fixed by its distance.
+  meshed at three detail levels from one skeleton each; the tripod never moves, so each tree's
+  level is fixed by its distance. They are three `BatchedMesh`es (branches, near leaves, far
+  billboard leaves that cast no shadow), culled per tree against whichever camera renders them:
+  an instanced mesh spanning the forest is never culled, and the trees were 9.5 M of the frame's
+  12.4 M triangles across the viewfinder and three shadow cascades. Measured A/B: full-screen
+  GPU time 19.3–19.8 → 17.6 ms, with the bench 24–25 → 20.7 ms; frame triangles 12.4 M → 5.5 M.
 - **Adaptive internal render scale** (§10): the live viewfinder and the bench render at a scale
   of 0.5–1 (the photograph always at native size; the resolve samples the live frame by UV).
   GPU time ∝ pixels ∝ scale², so a frame over the 13 ms budget drops the scale at once to
   what should fit; it climbs 0.05 at a time after 20 measurements in a row with room for the
   step. A fixed render width (tests) is never scaled.
-- **Frame time (open):** in the forest the scale settles at 0.5 and frames still take 14–18 ms
-  full-screen and 20–26 ms with the bench while focus is pulling (`npm run check -- m3perf`,
-  M1 Pro, Chrome 154; repeated runs of the same build vary by up to half after long GPU load,
-  so single figures are not compared). Most of the cost does not scale with pixels: the whole
-  forest is drawn for the viewfinder, the bench and three shadow cascades, though a 50 mm lens
-  sees about a ninth of it. Per-instance culling is the remedy.
+- **Frame time (open):** in the forest the scale settles at 0.5 and the GPU still spends
+  ~17.5 ms per full-screen frame and ~21 ms with the bench while focus is pulling (CPU ~3–5 ms;
+  `npm run check -- m3perf`, M1 Pro, Chrome 154; the same build varies by up to a third
+  between runs after long GPU load, so changes are measured as back-to-back A/B). Removing parts
+  of the forest: without trees 14.9 ms, without the undergrowth 18.0, without shadows 20.8 (no
+  saving). About 15 ms therefore does not depend on the forest: it is the live depth of field
+  and the native-resolution finish, and it is where the remaining time is.

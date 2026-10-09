@@ -9,12 +9,15 @@ import type { TreePlacement } from './trees'
  * broken up as a woodland floor is. A jittered grid whose cells grow with
  * distance (density falls where the ferns are small in frame), masked by
  * low-frequency noise into clumps, kept to a wedge a little wider than the
- * widest lens sees. Each fern variant is one instanced draw.
+ * widest lens sees. Instanced per variant: the ferns lie within the view, so
+ * culling them per fern would only add draws.
  */
 
 const L = LENS_WORLD
 const NEAREST = 2
 const FARTHEST = 80
+/** Ferns farther than this (m) cast no shadow. */
+const SHADOWS_TO = 20
 
 /** Ground the composed foreground owns, and the tree trunks. */
 function clear(x: number, z: number, trees: TreePlacement[]): boolean {
@@ -43,21 +46,27 @@ export function createUndergrowth(ferns: Mesh[], trees: TreePlacement[]): Group 
     d += cell
   }
 
-  const m = new Matrix4()
   const q = new Quaternion()
   const tilt = new Quaternion()
   const up = new Vector3(0, 1, 0)
   ferns.forEach((fern, vi) => {
     const mine = spots.filter((s) => s.variant === vi)
-    const mesh = new InstancedMesh(fern.geometry, fern.material, mine.length)
-    mine.forEach((s, i) => {
+    const matrices = mine.map((s) => {
       q.setFromAxisAngle(up, rand() * Math.PI * 2)
       tilt.setFromAxisAngle(new Vector3(rand() - 0.5, 0, rand() - 0.5).normalize(), rand() * 0.15)
-      m.compose(s.p, tilt.multiply(q), new Vector3().setScalar(0.75 + rand() * 0.7))
-      mesh.setMatrixAt(i, m)
+      return new Matrix4().compose(s.p, tilt.multiply(q), new Vector3().setScalar(0.75 + rand() * 0.7))
     })
-    mesh.castShadow = mesh.receiveShadow = true
-    group.add(mesh)
+    // Beyond SHADOWS_TO a fern's shadow is too small to see; it would cost
+    // its triangles once more in every shadow cascade.
+    for (const near of [true, false]) {
+      const band = matrices.filter((_, i) => (Math.hypot(mine[i].p.x - L.x, mine[i].p.z - L.z) <= SHADOWS_TO) === near)
+      if (band.length === 0) continue
+      const mesh = new InstancedMesh(fern.geometry, fern.material, band.length)
+      band.forEach((m, i) => mesh.setMatrixAt(i, m))
+      mesh.castShadow = near
+      mesh.receiveShadow = true
+      group.add(mesh)
+    }
   })
   console.info(`[forest] undergrowth: ${spots.length} ferns`)
   return group
