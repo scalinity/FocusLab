@@ -76,8 +76,18 @@ async function m2(app: App): Promise<void> {
   record('developed: GPU idle for 1 s', `${f1 - f0} frames rendered`, '0', f1 === f0)
 
   // 4. Device loss: everything is rebuilt and the state survives.
-  await page.evaluate(() => window.__focusLab!.device()!.destroy())
-  await page.waitForFunction(() => window.__focusLab?.device() !== null && window.__focusLab?.device() !== undefined)
+  // The loss is handled asynchronously: until then device() is still the
+  // destroyed device and `ready` the first start's. Wait for a new device;
+  // by then `ready` is the rebuild's.
+  await page.evaluate(() => {
+    const d = window.__focusLab!.device()!
+    ;(window as unknown as { lostDevice: GPUDevice }).lostDevice = d
+    d.destroy()
+  })
+  await page.waitForFunction(() => {
+    const d = window.__focusLab?.device()
+    return d != null && d !== (window as unknown as { lostDevice?: GPUDevice }).lostDevice
+  })
   await page.evaluate(() => window.__focusLab!.ready)
   const after = await page.evaluate(() => {
     const s = window.__focusLab!.state()
