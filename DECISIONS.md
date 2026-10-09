@@ -97,3 +97,28 @@ Specs state the current design; this file is where the reasons live.
 - Exposure uses the image-side f-number s_i/A, so close focus shows the bellows factor.
 - The plane-of-focus contour is the zero crossing of (1/d − k) between neighbouring pixels.
 - Splats build on three r186's WebGPU `GaussianSplat`; Spark 2.3.1 is WebGL2-only.
+
+## Exact exposure (M2)
+
+- **Sampling:** aperture positions from Roberts' R2 sequence mapped area-uniformly onto the iris
+  (angle from the R(φ)² distribution, radius R(φ)·√u); sub-pixel jitter from Halton(2,3). Two
+  different constructions keep the aperture and jitter samples decorrelated, and every prefix
+  of either is well spread, so the image is presentable at any sample count.
+- **Accumulation** is a compute pass adding each sample into an `array<vec4<f32>>` storage
+  buffer (the first sample assigns instead of adding, so no clear pass); float32 blending and
+  filtering are never used. A resolve pass divides by the count and crossfades from the live
+  frame between 16 and 32 samples.
+- **Samples per frame** follow the GPU timestamps: per-sample time = (render + compute ms) /
+  samples since the last resolve, budget 12 ms, at most 48 per frame.
+- **The bench is rendered into its own target and re-rendered only when it changes**, so an
+  exposing frame costs its samples plus two composites. Once the photo develops, the bench
+  re-renders once so the image plane shows the photograph.
+- **Orbiting the bench does not cancel an exposure.** It changes nothing in the photograph; every
+  change to optics, aperture, render size or visibility does cancel it.
+- **Point-target acceptance world** (`?world=points`): beads with a constant angular size of
+  about 3.5 px. A sub-pixel emitter only lands on pixel centres by chance and comes out as
+  speckle. The disc is measured by energy (total ÷ interior level), which is exact for any
+  emitter that leaves a flat interior. Pentagon orientation is measured with the 5th complex
+  moment, because a 5-fold symmetric shape has no skew.
+- Exposure is a fixed multiplier until the exposure chain lands with the forest (M4). Scene
+  time and shadow maps must freeze while exposing once the world animates.

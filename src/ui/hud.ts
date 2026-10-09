@@ -6,6 +6,7 @@ import { store, type StoreState } from '../state/store'
 import { LENS_WORLD, imageScale as imageScaleFor } from '../bench/geometry'
 import { BUNDLE_CSS } from '../bench/rays'
 import type { Rect } from '../render/layout'
+import type { Exposure } from '../state/renderState'
 import type { WorldSource } from '../worlds/WorldSource'
 import { formatDistance, formatStop } from './format'
 import { createSlider } from './slider'
@@ -16,6 +17,7 @@ export type LabelPositions = Record<'sheet' | 'plane' | 'lens', { x: number; y: 
 export interface Hud {
   placeLabels(p: LabelPositions): void
   placeViewfinder(rect: Rect): void
+  setExposure(e: Exposure): void
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', html = ''): HTMLElementTagNameMap[K] {
@@ -104,12 +106,15 @@ export function createHud(world: WorldSource): Hud {
   const labBtn = el('button', 'amber', 'Lab')
   labBtn.title = 'Lab mode: let the lens travel past infinity (L)'
   labBtn.addEventListener('click', () => setLab(!store.get().optics.lab))
+  const autoBtn = el('button', '', 'Auto')
+  autoBtn.title = 'Develop the exact exposure when you pause (Space exposes now)'
+  autoBtn.addEventListener('click', () => store.setUi({ autoExpose: !store.get().ui.autoExpose }))
   const vfBtn = el('button', '', 'VF')
   vfBtn.title = 'Viewfinder full screen (V)'
   vfBtn.addEventListener('click', () =>
     store.setUi({ viewfinder: store.get().ui.viewfinder === 'card' ? 'full' : 'card' }),
   )
-  tools.append(labBtn, vfBtn)
+  tools.append(labBtn, autoBtn, vfBtn)
 
   const gFocus = group('Focus', presetSeg.root)
   gFocus.value.textContent = '1 2 3'
@@ -124,7 +129,16 @@ export function createHud(world: WorldSource): Hud {
   ctl.append(row1, row2)
 
   // Viewfinder frame and 3D-anchored labels
-  const vf = el('div', 'vf-frame', '<span class="tag">Viewfinder · <b>live</b> · V</span>')
+  const vf = el('div', 'vf-frame')
+  const vfTag = el('span', 'tag')
+  const progress = el(
+    'div',
+    'progress',
+    '<svg viewBox="0 0 20 20"><circle class="bg" cx="10" cy="10" r="8"/><circle class="fg" cx="10" cy="10" r="8"/></svg>',
+  )
+  vf.append(vfTag, progress)
+  const progressArc = progress.querySelector<SVGCircleElement>('.fg')!
+  let lastTag = ''
   const pills = {
     sheet: el('div', 'pill'),
     plane: el('div', 'pill', 'Image plane <em>upside down</em>'),
@@ -166,6 +180,7 @@ export function createHud(world: WorldSource): Hud {
     const preset = world.presets.findIndex((p) => d.focusM !== null && Math.abs(1 / p.distanceM - 1 / d.focusM) < 0.02)
     presetSeg.select(preset >= 0 ? preset : null)
     labBtn.classList.toggle('on', o.lab)
+    autoBtn.classList.toggle('on', s.ui.autoExpose)
     vfBtn.classList.toggle('on', s.ui.viewfinder === 'full')
     ui.classList.toggle('off', s.ui.hidden)
     ui.classList.toggle('vf-full', s.ui.viewfinder === 'full')
@@ -195,6 +210,20 @@ export function createHud(world: WorldSource): Hud {
         pill.hidden = pos === null || store.get().ui.viewfinder === 'full'
         if (pos !== null) pill.style.transform = `translate(${pos.x}px, ${pos.y}px) translate(-50%, -130%)`
       }
+    },
+    setExposure(e) {
+      const tag =
+        e.mode === 'LIVE'
+          ? 'Viewfinder · <b>live</b>'
+          : e.mode === 'EXPOSING'
+            ? `Exposing · <b>${e.samples}/${e.target}</b>`
+            : `Photograph · <b>${e.target} samples</b>`
+      if (tag !== lastTag) {
+        vfTag.innerHTML = tag
+        lastTag = tag
+      }
+      progress.hidden = e.mode !== 'EXPOSING'
+      progressArc.style.strokeDashoffset = String(50.27 * (1 - e.samples / e.target))
     },
     placeViewfinder(rect) {
       Object.assign(vf.style, {

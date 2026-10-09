@@ -87,6 +87,9 @@ export function bindInput(canvas: HTMLCanvasElement, view: FocusRenderer, world:
       case 'R':
         view.resetView()
         break
+      case ' ':
+        view.exposeNow()
+        break
       default:
         return
     }

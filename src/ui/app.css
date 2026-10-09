@@ -545,3 +545,34 @@ button:focus-visible,
 #ui.vf-full .vignette {
   display: none;
 }
+
+/* Exposure progress on the viewfinder card */
+.vf-frame .progress {
+  position: absolute;
+  right: 0;
+  top: -24px;
+  width: 18px;
+  height: 18px;
+}
+
+.vf-frame .progress[hidden] {
+  display: none;
+}
+
+.vf-frame .progress circle {
+  fill: none;
+  stroke-width: 2.4;
+}
+
+.vf-frame .progress .bg {
+  stroke: #ffffff24;
+}
+
+.vf-frame .progress .fg {
+  stroke: var(--cyan);
+  stroke-dasharray: 50.27;
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 0 3px #7fe3ff99);
+}

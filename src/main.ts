@@ -9,6 +9,8 @@ import { createHud } from './ui/hud'
 import { bindInput } from './ui/input'
 import { showFatal } from './ui/fatal'
 import { createTestCards } from './worlds/testCards'
+import { createPointTargets } from './worlds/pointTargets'
+import { measureDisc, type DiscMeasure } from './render/measure'
 
 const canvas = document.getElementById('view') as HTMLCanvasElement
 
@@ -37,6 +39,11 @@ declare global {
       state(): StoreState
       bundles(): Bundle[]
       ringScreenPoint(): { x: number; y: number } | null
+      /** Starts an exposure and resolves when it has developed. */
+      develop(): Promise<{ samples: number }>
+      framesRendered(): number
+      /** Measures the developed disc in a square crop centred on (x, y), px. */
+      measure(x: number, y: number, size: number): Promise<DiscMeasure>
     }
   }
 }
@@ -47,7 +54,7 @@ let unbind: (() => void) | null = null
 // Canvas textures (chart labels, the ring scale) are drawn once; wait for the
 // bundled fonts so they use them.
 await Promise.all([document.fonts.load('600 46px "Outfit Variable"'), document.fonts.load('500 30px "DM Mono"')])
-const world = createTestCards()
+const world = new URLSearchParams(location.search).get('world') === 'points' ? createPointTargets() : createTestCards()
 const hud = createHud(world)
 
 /**
@@ -119,6 +126,22 @@ function run(): Promise<HarnessReport> {
       state: () => store.get(),
       bundles: () => view?.rays.bundles ?? [],
       ringScreenPoint: () => view?.ringScreenPoint() ?? null,
+      framesRendered: () => view?.framesRendered() ?? 0,
+      develop: async () => {
+        view!.exposeNow()
+        await view!.developed()
+        return { samples: view!.exposure().samples }
+      },
+      measure: async (x, y, size) => {
+        const { data, width } = await view!.readAccumulation()
+        const crop = new Float32Array(size * size * 4)
+        const x0 = Math.round(x - size / 2)
+        const y0 = Math.round(y - size / 2)
+        for (let r = 0; r < size; r++) {
+          crop.set(data.subarray(((y0 + r) * width + x0) * 4, ((y0 + r) * width + x0 + size) * 4), r * size * 4)
+        }
+        return measureDisc(crop, size, size)
+      },
     }
   }
   return ready

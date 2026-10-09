@@ -12,6 +12,11 @@ export interface Settings extends OpticsState {
 export interface UiState {
   viewfinder: 'card' | 'full'
   hidden: boolean
+  /** Develop the exact exposure after a pause without input. */
+  autoExpose: boolean
+  tier: 'low' | 'high' | 'ultra'
+  /** Fixed viewfinder render width in px (tests); null follows the card. */
+  renderWidth: number | null
 }
 
 export interface StoreState {
@@ -57,5 +62,5 @@ const si = sensorDistance(50, metresToMm(3))
 /** Default: 50 mm at f/2, focused at 3 m, circular iris. */
 export const store = createStore(
   { f: 50, N: 2, si, siTarget: si, lab: false, aperture: CIRCULAR },
-  { viewfinder: 'card', hidden: false },
+  { viewfinder: 'card', hidden: false, autoExpose: true, tier: 'high', renderWidth: null },
 )

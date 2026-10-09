@@ -10,6 +10,8 @@ import {
   RenderTarget,
   SRGBColorSpace,
   Scene,
+  TimestampQuery,
+  Vector2,
   Vector3,
   WebGPURenderer,
 } from 'three/webgpu'
@@ -20,22 +22,35 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import { WebGPUUnavailable, type Gpu } from '../gpu/device'
 import { BENCH_LAYER, createBenchModel, type BenchModel } from '../bench/benchModel'
 import { LENS_WORLD, chooseSubjects, imageScale } from '../bench/geometry'
-import { maxSensorDistance } from '../optics/travel'
-import { mmToMetres } from '../optics/world'
 import { createRayView, type RayView } from '../bench/rays'
 import { stepSpring } from '../optics/spring'
+import { maxSensorDistance } from '../optics/travel'
+import { apertureRadiusM, mmToMetres } from '../optics/world'
+import {
+  TIER_SAMPLES,
+  addSamples,
+  exposeNow,
+  initialExposure,
+  onInput,
+  tick,
+  type Exposure,
+} from '../state/renderState'
 import { store } from '../state/store'
 import type { Hud, LabelPositions } from '../ui/hud'
 import type { WorldSource } from '../worlds/WorldSource'
+import { createExposureEngine } from './exposure'
 import { contour } from './focusContour'
 import { viewfinderRect } from './layout'
 
 /**
  * Owns the frame loop. One scene, two cameras: the viewfinder camera is the
- * lens (layer 0, the world only) and renders into an HDR target; the bench
- * camera orbits (layers 0 and 1) and renders the full window with bloom. The
- * viewfinder is then composited as an exact-pixel card, never resampled
- * through 3D. Rendering happens only when something changed.
+ * lens (layer 0, the world only); the bench camera orbits (layers 0 and 1).
+ *
+ * The viewfinder is LIVE (a pinhole render) until the photo has been still
+ * for a moment, then EXPOSES exact aperture samples and finally DEVELOPS,
+ * after which nothing is rendered until something changes. The bench is
+ * rendered into its own target only when it changes, so an exposing frame
+ * costs its samples plus two cheap composites.
  */
 
 export interface FocusRenderer {
@@ -48,7 +63,15 @@ export interface FocusRenderer {
   frame(): Promise<void>
   /** Resolves once the focus spring has settled and that state is on screen. */
   settled(): Promise<void>
-  /** Screen position (CSS px) of the top of the focus ring, for the harness. */
+  /** Starts an exposure now (Space). */
+  exposeNow(): void
+  /** Resolves when the current exposure has developed. */
+  developed(): Promise<void>
+  exposure(): Exposure
+  /** Frames actually rendered (the loop skips frames when nothing changed). */
+  framesRendered(): number
+  readAccumulation(): Promise<{ data: Float32Array; width: number; height: number }>
+  /** Screen position (CSS px) of the ring point facing the bench camera, for the harness. */
   ringScreenPoint(): { x: number; y: number } | null
   resetView(): void
   dispose(): void
@@ -74,6 +97,12 @@ function skyNode() {
   return mix(mix(ground, horizon, smoothstep(-0.08, 0, up)), zenith, smoothstep(0, 0.6, up))
 }
 
+/** GPU budget per frame for exposure samples, ms (holds ~60 fps on top of the composites). */
+const SAMPLE_BUDGET_MS = 12
+const MAX_SAMPLES_PER_FRAME = 48
+/** Crossfade from the live frame once this many samples exist, complete at twice that. */
+const FADE_FROM = 16
+
 export async function createRenderer(
   canvas: HTMLCanvasElement,
   gpu: Gpu,
@@ -88,20 +117,20 @@ export async function createRenderer(
   }
 
   const scene = new Scene()
-  scene.backgroundNode = skyNode()
+  scene.backgroundNode = world.background ?? skyNode()
   scene.add(world.root)
 
   const pmrem = new PMREMGenerator(renderer)
   const env = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
 
-  const vfTarget = new RenderTarget(1, 1, { type: HalfFloatType, samples: 4 })
+  const exposure = createExposureEngine(renderer)
   const vfCamera = new PerspectiveCamera(30, 1.5, 0.02, 3000)
   vfCamera.position.set(LENS_WORLD.x, LENS_WORLD.y, LENS_WORLD.z)
   vfCamera.layers.set(0)
 
   const rig = new Group()
   rig.position.copy(vfCamera.position)
-  const bench = createBenchModel(env, vfTarget.texture)
+  const bench = createBenchModel(env, exposure.image.texture)
   const rays = createRayView()
   rig.add(bench.group, rays.group)
   scene.add(rig)
@@ -122,38 +151,74 @@ export async function createRenderer(
   }
   resetView()
 
-  // Bench view: HDR scene → bloom → explicit tone map and output transform.
-  const benchPass = pass(scene, benchCamera)
-  const benchColor = benchPass.getTextureNode()
+  // Bench view: HDR scene → bloom → explicit tone map and output transform,
+  // into its own target so exposing frames only re-composite it.
+  const benchOut = new RenderTarget(1, 1, { type: HalfFloatType })
+  const benchColor = pass(scene, benchCamera).getTextureNode()
   const benchPipeline = new RenderPipeline(renderer)
   benchPipeline.outputColorTransform = false
   benchPipeline.outputNode = renderOutput(benchColor.add(bloom(benchColor, 0.6, 0.35, 1.6)), AgXToneMapping, SRGBColorSpace)
+  const blitPipeline = new RenderPipeline(renderer)
+  blitPipeline.outputColorTransform = false
+  blitPipeline.outputNode = texture(benchOut.texture)
 
-  // Viewfinder card: the HDR render, tone mapped once, at its own pixels.
+  // Viewfinder card: the HDR image, tone mapped once, at its own pixels.
   const cardPipeline = new RenderPipeline(renderer)
   cardPipeline.outputColorTransform = false
-  cardPipeline.outputNode = renderOutput(texture(vfTarget.texture), AgXToneMapping, SRGBColorSpace)
+  cardPipeline.outputNode = renderOutput(texture(exposure.image.texture), AgXToneMapping, SRGBColorSpace)
 
-  let dirty = true
+  let ex = initialExposure(performance.now(), TIER_SAMPLES[store.get().ui.tier])
+  let photoKey = ''
+  let benchDirty = true
+  let frameDirty = true
   let velocity = 0
   let frameWaiters: Array<() => void> = []
+  let samplesPerFrame = 2
+  let samplesSinceResolve = 0
+  let resolving = false
+  let rendered = 0
+
   const markDirty = (): void => {
-    dirty = true
+    benchDirty = true
+    frameDirty = true
   }
   const resize = (): void => {
     renderer.setPixelRatio(devicePixelRatio)
     renderer.setSize(innerWidth, innerHeight, false)
-    dirty = true
+    markDirty()
   }
   resize()
   addEventListener('resize', resize)
   const unsubscribe = store.subscribe(markDirty)
-  controls.addEventListener('change', markDirty)
+  controls.addEventListener('change', () => (benchDirty = true))
+  const visibility = (): void => {
+    if (document.hidden) ex = onInput(ex, performance.now())
+    markDirty()
+  }
+  document.addEventListener('visibilitychange', visibility)
 
   const project = (p: number[]): { x: number; y: number } | null => {
     const v = new Vector3(p[0], p[1], p[2]).add(rig.position).project(benchCamera)
     if (v.z > 1 || Math.abs(v.x) > 1.2 || Math.abs(v.y) > 1.2) return null
     return { x: ((v.x + 1) / 2) * innerWidth, y: ((1 - v.y) / 2) * innerHeight }
+  }
+
+  /** Per-sample GPU time from timestamp queries sets how many samples fit a frame. */
+  function adaptSamples(): void {
+    if (resolving || samplesSinceResolve === 0 || !renderer.hasFeature('timestamp-query')) return
+    resolving = true
+    const n = samplesSinceResolve
+    samplesSinceResolve = 0
+    Promise.all([
+      renderer.resolveTimestampsAsync(TimestampQuery.RENDER),
+      renderer.resolveTimestampsAsync(TimestampQuery.COMPUTE),
+    ]).then(([r, c]) => {
+      const perSample = ((r ?? 0) + (c ?? 0)) / n
+      if (perSample > 0) {
+        samplesPerFrame = Math.max(1, Math.min(MAX_SAMPLES_PER_FRAME, Math.floor(SAMPLE_BUDGET_MS / perSample)))
+      }
+      resolving = false
+    })
   }
 
   let last = performance.now()
@@ -177,55 +242,91 @@ export async function createRenderer(
       benchCamera.position.copy(to.target).add(offset)
       framedF = o.f
     }
-    if (controls.update(dt)) dirty = true
-    if (!dirty) return
-    dirty = false
+    controls.update(dt)
 
     const { optics, derived, ui } = store.get()
     const rect = viewfinderRect(innerWidth, innerHeight, ui.viewfinder)
-    hud.placeViewfinder(rect)
-    const vw = Math.max(1, Math.floor(rect.w * devicePixelRatio))
-    const vh = Math.max(1, Math.floor(rect.h * devicePixelRatio))
-    if (vfTarget.width !== vw || vfTarget.height !== vh) vfTarget.setSize(vw, vh)
+    const W = ui.renderWidth ?? Math.max(1, Math.floor(rect.w * devicePixelRatio))
+    const H = Math.max(1, Math.round((W * 2) / 3))
+    exposure.resize(W, H)
 
+    // Anything that changes the photo discards the exposure.
+    const ap = optics.aperture
+    const key = [optics.f, optics.N, optics.si, ap.blades, ap.roundness, ap.rotation, W, H].join('|')
+    if (key !== photoKey) {
+      photoKey = key
+      ex = onInput(ex, now)
+    }
+    ex = { ...tick(ex, now, ui.autoExpose && !document.hidden), target: TIER_SAMPLES[ui.tier] }
+    if (!benchDirty && !frameDirty && ex.mode !== 'EXPOSING') return
+
+    hud.placeViewfinder(rect)
     vfCamera.fov = MathUtils.radToDeg(derived.vfov)
     vfCamera.updateProjectionMatrix()
-    benchCamera.aspect = innerWidth / innerHeight
-    benchCamera.updateProjectionMatrix()
-
     contour.lens.value.copy(vfCamera.position)
     contour.kPerM.value = derived.kPerM
     contour.tanW.value = 18 / optics.si
     contour.tanH.value = 12 / optics.si
 
-    bench.update(optics, { nearM: derived.dofNearM, farM: derived.dofFarM })
-    rays.update(optics, optics.aperture, chooseSubjects(world.subjects, world.far, derived.kPerM))
-
     contour.strength.value = 0
-    renderer.setRenderTarget(vfTarget)
-    renderer.render(scene, vfCamera)
-    renderer.setRenderTarget(null)
-
-    if (ui.viewfinder === 'card') {
-      contour.strength.value = 1
-      renderer.setViewport(0, 0, innerWidth, innerHeight)
-      benchPipeline.render()
-    } else {
-      renderer.setViewport(0, 0, innerWidth, innerHeight)
-      renderer.clear()
+    if (ex.mode === 'LIVE' && frameDirty) {
+      exposure.renderLive(scene, vfCamera)
+      exposure.resolve(0)
+    } else if (ex.mode === 'EXPOSING') {
+      const n = Math.min(samplesPerFrame, ex.target - ex.samples)
+      exposure.renderSamples(
+        scene,
+        vfCamera,
+        {
+          kPerM: derived.kPerM,
+          apertureRadiusM: apertureRadiusM(optics),
+          aperture: optics.aperture,
+          tanW: 18 / optics.si,
+          tanH: 12 / optics.si,
+        },
+        ex.samples,
+        n,
+      )
+      ex = addSamples(ex, n)
+      samplesSinceResolve += n
+      exposure.resolve(ex.mode === 'DEVELOPED' ? 1 : MathUtils.smoothstep(ex.samples, FADE_FROM, 2 * FADE_FROM))
+      // The image plane on the bench shows the photograph once it has developed.
+      if (ex.mode === 'DEVELOPED') benchDirty = true
     }
+
+    if (ui.viewfinder === 'card' && benchDirty) {
+      benchCamera.aspect = innerWidth / innerHeight
+      benchCamera.updateProjectionMatrix()
+      bench.update(optics, { nearM: derived.dofNearM, farM: derived.dofFarM })
+      rays.update(optics, optics.aperture, chooseSubjects(world.subjects, world.far, derived.kPerM))
+      const size = renderer.getDrawingBufferSize(new Vector2())
+      if (benchOut.width !== size.x || benchOut.height !== size.y) benchOut.setSize(size.x, size.y)
+      contour.strength.value = 1
+      renderer.setRenderTarget(benchOut)
+      benchPipeline.render()
+      renderer.setRenderTarget(null)
+      const labels: LabelPositions = {
+        sheet: rays.sheetAnchor === null ? null : project(rays.sheetAnchor),
+        plane: project(bench.anchors.planeTop),
+        lens: project(bench.anchors.lensTop),
+      }
+      hud.placeLabels(labels)
+    }
+
+    renderer.setViewport(0, 0, innerWidth, innerHeight)
+    if (ui.viewfinder === 'card') blitPipeline.render()
+    else renderer.clear()
     renderer.autoClear = false
     renderer.setViewport(rect.x, rect.y, rect.w, rect.h)
     cardPipeline.render()
     renderer.autoClear = true
     renderer.setViewport(0, 0, innerWidth, innerHeight)
 
-    const labels: LabelPositions = {
-      sheet: rays.sheetAnchor === null ? null : project(rays.sheetAnchor),
-      plane: project(bench.anchors.planeTop),
-      lens: project(bench.anchors.lensTop),
-    }
-    hud.placeLabels(labels)
+    hud.setExposure(ex)
+    adaptSamples()
+    rendered++
+    benchDirty = false
+    frameDirty = false
 
     const waiters = frameWaiters
     frameWaiters = []
@@ -235,7 +336,7 @@ export async function createRenderer(
   const frame = (): Promise<void> =>
     new Promise((resolve) => {
       frameWaiters.push(resolve)
-      dirty = true
+      frameDirty = true
     })
 
   return {
@@ -253,7 +354,16 @@ export async function createRenderer(
       }
       await frame()
     },
-    resetView,
+    exposeNow() {
+      ex = exposeNow(ex)
+      frameDirty = true
+    },
+    async developed() {
+      while (ex.mode !== 'DEVELOPED') await frame()
+    },
+    exposure: () => ex,
+    framesRendered: () => rendered,
+    readAccumulation: () => exposure.readAccumulation(),
     ringScreenPoint() {
       // The point of the ring (centred on the axis) that faces the bench camera.
       const r = bench.ring
@@ -263,16 +373,18 @@ export async function createRenderer(
       const len = Math.hypot(cam.x, cam.y) || 1
       return project([(radius * cam.x) / len, (radius * cam.y) / len, r.position.z])
     },
+    resetView,
     dispose() {
       renderer.setAnimationLoop(null)
       removeEventListener('resize', resize)
+      document.removeEventListener('visibilitychange', visibility)
       unsubscribe()
       controls.dispose()
       bench.dispose()
       rays.dispose()
-      benchPipeline.dispose()
-      cardPipeline.dispose()
-      vfTarget.dispose()
+      exposure.dispose()
+      for (const p of [benchPipeline, blitPipeline, cardPipeline]) p.dispose()
+      benchOut.dispose()
       env.dispose()
       pmrem.dispose()
       scene.remove(world.root)

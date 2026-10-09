@@ -1,4 +1,4 @@
-import type { Object3D } from 'three/webgpu'
+import type { Node, Object3D } from 'three/webgpu'
 import type { Subject } from '../bench/geometry'
 
 /**
@@ -14,5 +14,7 @@ export interface WorldSource {
   far: Subject
   /** Foreground, middle and background focus targets (number keys 1–3). */
   presets: Array<{ name: string; distanceM: number }>
+  /** Sky or backdrop (TSL node); a default sky when absent. */
+  background?: Node
   dispose(): void
 }

@@ -56,3 +56,48 @@ export function apertureOutline(ap: Aperture, diameter: number, segments = 96): 
   }
   return pts
 }
+
+const CDF_BINS = 1024
+const cdfCache = new Map<string, Float64Array>()
+
+/** Cumulative angle distribution with density ∝ R(φ)², so area sampling is uniform. */
+function angleCdf(ap: Aperture): Float64Array {
+  const key = `${ap.blades}|${ap.roundness}|${ap.rotation}`
+  let cdf = cdfCache.get(key)
+  if (cdf === undefined) {
+    cdf = new Float64Array(CDF_BINS + 1)
+    for (let i = 0; i < CDF_BINS; i++) {
+      const r = shapeRadius(ap, ((i + 0.5) / CDF_BINS) * 2 * Math.PI)
+      cdf[i + 1] = cdf[i] + r * r
+    }
+    for (let i = 1; i <= CDF_BINS; i++) cdf[i] /= cdf[CDF_BINS]
+    cdfCache.set(key, cdf)
+  }
+  return cdf
+}
+
+/**
+ * Area-uniform point in the opening from two numbers in [0, 1): the angle
+ * from the R(φ)² distribution, the radius as R(φ)·√u. Units: the radius of the
+ * area-equivalent circle, so a circular iris fills the unit disc. Feeding a
+ * low-discrepancy sequence keeps every prefix of samples well spread.
+ */
+export function sampleAperture(ap: Aperture, u1: number, u2: number): [number, number] {
+  let phi: number
+  if (ap.blades < 3) {
+    phi = u1 * 2 * Math.PI
+  } else {
+    const cdf = angleCdf(ap)
+    let lo = 0
+    let hi = CDF_BINS
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1
+      if (cdf[mid] <= u1) lo = mid
+      else hi = mid
+    }
+    const t = (u1 - cdf[lo]) / (cdf[lo + 1] - cdf[lo] || 1)
+    phi = ((lo + t) / CDF_BINS) * 2 * Math.PI
+  }
+  const r = areaScale(ap) * shapeRadius(ap, phi) * Math.sqrt(u2)
+  return [r * Math.cos(phi), r * Math.sin(phi)]
+}
