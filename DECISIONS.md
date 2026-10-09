@@ -43,25 +43,53 @@ Specs state the current design; this file is where the reasons live.
 - **Bladed apertures are area-equivalent to the circle of diameter A**, the way f-numbers are
   calibrated, so blade count never changes exposure.
 
-## Composition
+## Layout and composition
 
+- **One full-window 3D scene instead of the split screen**, in the design language of DESIGN.md:
+  an orbitable optical bench on the forest floor, glass UI cards over it, and the viewfinder as
+  a 3:2 card at the bottom that switches to full screen. The bench and the viewfinder are two
+  cameras on one world: the bench camera orbits, the viewfinder camera is the lens.
+- **Object space at true scale, image space magnified ×N.** Subjects, object-side rays and the
+  plane-of-focus sheet are drawn in real metres; behind the lens plane the element, iris, barrel
+  and image plane are drawn ×N on the same optical axis, so a 0.2 mm blur circle becomes visible.
+  Uniform scaling preserves angles and convergence inside image space; the one discontinuity is
+  at the lens plane, where the scale break is labelled.
+- **The viewfinder is composited, never textured onto a 3D surface**, so its pixels are exact and
+  pixel blur = c/36 mm × render width holds literally. The image plane inside the bench shows the
+  same render as a texture, upside down.
+- **The viewfinder is a fixed 3:2 frame**, so its render width is exactly the 36 mm sensor width.
 - **Camera on a low tripod, lens ≈0.45 m above the ground.** At eye height a level 50 mm lens sees
   no ground nearer than 6.7 m, and at 0.35 m the frame is only ±7 cm tall, so the near heroes
   could not be in frame.
-- **The viewfinder shows a fixed 3:2 frame** fitted inside its panel, so the render width is
-  exactly the 36 mm sensor width at every window size and pixel blur = c/36 mm × width holds
-  literally.
+- **Rear-focusing bench.** The lens stays where the tripod holds it and the focus ring drives the
+  image-plane carriage along the rail. This is optically identical to moving the glass (only s_i
+  matters), keeps every distance lens-referenced and keeps the viewfinder camera fixed in the
+  world.
+- **Image-space magnification is ×8, reduced for long lenses** (×6.6 at 135 mm) so the magnified
+  barrel clears the ground under the 0.45 m axis. The sensor is therefore 288 × 192 mm on the bench
+  for every lens up to 85 mm; the lens-plane label always shows the current ×N.
+- **The bench camera keeps its orbit angle across lens swaps** and rescales its distance with the
+  magnified camera's length, so 24 mm and 135 mm both stay framed.
+- **The cut line needs a measurable gradient.** A surface lying exactly on the plane of focus has
+  1/d − k ≈ 0 everywhere and no crossing, so it shows the sheet's grid instead of glowing.
+- **Bloom threshold 1.6** (linear): only HDR rays and highlights bloom, never sunlit paper.
+- **AgX tone mapping for now**, chosen by eye on the test cards for its gentle highlight rolloff
+  on the rays; re-judged against Khronos PBR Neutral on the forest in M4.
+- **Fonts are bundled locally** (Outfit and DM Mono, both OFL) so the app loads nothing from
+  outside localhost.
+- **Visual verification runs in Google Chrome only** (the harness).
 
 ## Spec refinements adopted (proposed before building)
 
-- Depth strip on a dioptre axis (1/d) labelled in metres, not log: ∞ is a finite point, blur is
-  linear in 1/d (so the DoF band is a fixed-width window), and past-infinity focus shows as
-  negative dioptres.
-- Bench object side drawn under a projective compression (d, y) → (d/(d+D₀), G·y/(d+D₀)): rays
-  stay straight and intersections exact while ∞ lands on a finite line. Explicit scale break at
-  the lens.
-- Bokeh orientation flips across focus (sign of k − 1/d); live kernels and the sensor inset
-  rotate the aperture shape by the sign of the CoC, as the exact path does by construction.
+- The distance slider is a dioptre axis (1/d) labelled in metres, with the subjects marked on
+  it: ∞ is a finite point, blur is linear in 1/d (so the sharp-zone band has constant width for a
+  given lens and f-number), and past-infinity focus shows as negative dioptres.
+- Bokeh orientation flips across focus. An aperture point a moves the image point by
+  a·s_i·(1/d − k) on the (inverted) sensor and by a·s_i·(k − 1/d) in the displayed photo, so
+  in the photo far-field bokeh is the aperture upright and near-field bokeh is it rotated 180°.
+  Aperture rotation is defined in the camera frame, which makes it the far-field bokeh shape.
+  Live kernels and the sensor inset rotate the shape by the sign of the CoC, as the exact path
+  does by construction.
 - Spherical aberration is calibrated per physical zone height, so it falls as 1/N² when stopping
   down. An under-corrected singlet gives soap-bubble rims on foreground bokeh only.
 - Cat's-eye vignetting comes from a second stop (the barrel's front opening), tested per pixel

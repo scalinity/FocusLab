@@ -4,7 +4,10 @@
  * has a real Apple hardware adapter on the WebGPU backend, then captures.
  *
  *   npm run dev            (in another terminal)
- *   npm run shoot -- <name> [query-string]
+ *   npm run shoot -- <name> [state-json]
+ *
+ * The optional state is passed to the app's harness hook (focus, f, N, ui…)
+ * and the capture waits until the focus has settled on screen.
  *
  * Screenshots land in shots/<name>.png (git-ignored).
  */
@@ -14,7 +17,7 @@ import { join } from 'node:path'
 import { chromium } from 'playwright'
 
 const ORIGIN = 'http://localhost:5190'
-const [name = 'shot', query = ''] = process.argv.slice(2)
+const [name = 'shot', stateJson = ''] = process.argv.slice(2)
 
 class HarnessFailure extends Error {}
 
@@ -29,7 +32,7 @@ try {
   process.exit(1)
 }
 
-const url = `${ORIGIN}/?harness${query ? `&${query}` : ''}`
+const url = `${ORIGIN}/?harness`
 const profile = mkdtempSync(join(tmpdir(), 'focus-lab-shoot-'))
 const context = await chromium.launchPersistentContext(profile, {
   channel: 'chrome',
@@ -40,12 +43,19 @@ const context = await chromium.launchPersistentContext(profile, {
 })
 
 try {
-  const page = context.pages()[0] ?? (await context.waitForEvent('page'))
+  // The --app window replaces its first page during startup; wait for the one
+  // that holds the app.
+  let page = context.pages().find((p) => p.url().startsWith(ORIGIN))
+  for (let i = 0; page === undefined && i < 100; i++) {
+    await new Promise((r) => setTimeout(r, 100))
+    page = context.pages().find((p) => p.url().startsWith(ORIGIN))
+  }
+  if (page === undefined) fail('the app window never opened')
   const logs: string[] = []
   page.on('console', (m) => logs.push(`[${m.type()}] ${m.text()}`))
   page.on('pageerror', (e) => logs.push(`[pageerror] ${e.message}`))
-  // Reload so every message from a clean start is captured.
-  await page.reload({ waitUntil: 'load' })
+  // Load again so every message from a clean start is captured.
+  await page.goto(url, { waitUntil: 'load' })
 
   const adapter = await page.evaluate(async () => {
     if (!('gpu' in navigator)) return { error: 'navigator.gpu is missing' }
@@ -69,7 +79,8 @@ try {
   if (report.backend !== 'webgpu') fail(`app backend is ${report.backend}`)
   console.log(`shoot: adapter ${ident.trim()} · ${report.features.length} features`)
 
-  await page.waitForTimeout(500)
+  if (stateJson) await page.evaluate((s) => window.__focusLab!.set(JSON.parse(s)), stateJson)
+  await page.waitForTimeout(300)
   mkdirSync('shots', { recursive: true })
   const path = `shots/${name}.png`
   await page.screenshot({ path })

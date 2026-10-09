@@ -40,8 +40,12 @@ export const sensorDistance = (f: number, so: number): number => 1 / (1 / f - 1 
 /**
  * Signed blur-circle diameter on the sensor (mm) for an object at axial
  * distance `d` mm (Infinity for sky): c = A·s_i·(k − 1/d).
- * Negative in the near field, positive in the far field. The sign is also the
- * direction an aperture offset moves the image point on the sensor.
+ * Negative in the near field, positive in the far field.
+ *
+ * An aperture point `a` (camera frame) moves the image point by a·s_i·(1/d − k)
+ * on the sensor, which is inverted; in the displayed photo that becomes
+ * a·s_i·(k − 1/d), the same sign as c. So far-field bokeh shows the aperture
+ * upright in the photo, and near-field bokeh shows it rotated 180°.
  */
 export function signedBlur(lens: Lens, d: number): number {
   const A = apertureDiameter(lens.f, lens.N)

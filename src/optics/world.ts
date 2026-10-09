@@ -19,7 +19,7 @@ const MM_PER_M = 1000
 
 export const metresToMm = (m: number): number => m * MM_PER_M
 
-const mmToMetres = (mm: number): number => mm / MM_PER_M
+export const mmToMetres = (mm: number): number => mm / MM_PER_M
 
 export interface OpticsState extends Lens {
   /** Lab mode: the lens may travel past the infinity stop. */
