@@ -252,5 +252,9 @@ Specs state the current design; this file is where the reasons live.
   `npm run check -- m3perf`, M1 Pro, Chrome 154; the same build varies by up to a third
   between runs after long GPU load, so changes are measured as back-to-back A/B). Removing parts
   of the forest: without trees 14.9 ms, without the undergrowth 18.0, without shadows 20.8 (no
-  saving). About 15 ms therefore does not depend on the forest: it is the live depth of field
-  and the native-resolution finish, and it is where the remaining time is.
+  saving). With the scale held fixed the full-screen frame interval is 17.4 ms at 0.5, 23.5 at
+  0.75 and 28.9 at 1, i.e. about 13.6 ms + 15.3 ms × scale²: the scale controller is right to
+  sit at 0.5, and the 13.6 ms that does not scale is the next target. Removing the finish's bloom
+  or the highlight sprites does not change it. The display refreshes at 120 Hz, so intervals
+  come in multiples of 8.3 ms: a frame needing 9–16 ms of GPU time shows as 16.7 ms. A per-pass
+  breakdown is still missing (three's per-pass timestamps overcount on this GPU, see M2).
