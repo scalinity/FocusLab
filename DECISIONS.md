@@ -173,3 +173,41 @@ Specs state the current design; this file is where the reasons live.
   (sharp over blur) and 2.8% (blur over sharp) of edge contrast at the 5 px scale. Live frame
   interval on the test cards: 8.3 ms still, 12.2 ms while pulling focus with the bench, 15.4 ms
   full-screen at 1794 px while pulling focus. The forest will need the adaptive render scale.
+
+## Forest (M4)
+
+- **Light:** the `river_walk_1` HDRI is rotated so its sun stands 20° left of the view axis
+  at 8.6° elevation (backlit). Its sun is clipped to 6 in the image-based lighting and carried
+  by a directional light (intensity 5) with three cascaded shadow maps out to 180 m, so the
+  sun casts shadows and the sky does not light everything from every angle.
+- **A gap in the canopy for the sun:** at 8.6° the sun's ray from the foreground climbs 0.15 m
+  per metre, so crowns up to ~130 m away shade it. Trees within a crown's reach (9 m × scale)
+  of that ray, short of where it clears the treetops (22 m × scale), are not placed. Without
+  the gap the whole foreground sat in canopy shade and read as overcast; with it the
+  foreground is sunlit and the 3 m trunk throws its shadow towards the camera.
+- **Translucency is part of the sun's direct light** (`MeshSSSNodeMaterial`, configured in
+  `translucency.ts`), so tissue in shadow does not glow. Glow is gated by −N·L of the visible
+  face. Shadows on translucent materials are looked up 3 cm towards the sun
+  (`receivedShadowPositionNode`): the shadow map's normal offset alone would put the lookup on
+  a leaf's shaded face behind the leaf. Thick caps still shadow their own centre, so only rims
+  and gills glow.
+- **Composed foreground** (`heroes.ts`), for the low tripod: mushrooms on a mossy log at
+  0.35 m, a dewy fern frond at 0.8 m (dew: mirror-smooth spheres whose sun glints become
+  bokeh), wood anemones around 1.7 m, a mossy trunk whose near face is at 3 m, a fallen log at
+  7.2 m. These are the world's subjects for the bench and the presets. Mushrooms and the trunk
+  are procedural (no CC0 mushroom model exists); lathe profiles run bottom to top so faces
+  point outwards.
+- **Undergrowth:** the `fern_02` model holds four variants on a 1 m grid; each is one
+  instanced draw (688 instances), scattered on a jittered grid whose cells grow with distance,
+  masked by noise into clumps, kept to a wedge wider than the 24 mm view, clear of the
+  composed foreground and the trunks. Cost: ~1 ms per frame.
+- **Trees:** ez-tree geometry (vendored at `dcf309b`, MIT) for oak, ash and aspen presets,
+  meshed at three detail levels from one skeleton each and instanced; the tripod never moves,
+  so each instance's level is fixed by its distance.
+- **Frame time (open):** the forest misses 60 fps while focus is pulling: 12.2 ms still,
+  26.6 ms pulling focus with the bench, 21.6 ms full-screen (`npm run check -- m3perf`, M1 Pro,
+  Chrome 154). Without the undergrowth it is 10.8 / 25.6 / 21.2 ms, so the shortfall comes with
+  the forest itself, not the ferns. The adaptive internal render scale is the planned remedy.
+- **Live DoF on forest content (open):** an in-focus mushroom cap against a background blurred
+  ~170 px shows black specks, a stair-stepped outline and seams on 16 px tile boundaries in the
+  live view; the exact exposure of the same state is clean.

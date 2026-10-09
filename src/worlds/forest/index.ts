@@ -2,16 +2,21 @@ import {
   DirectionalLight,
   EquirectangularReflectionMapping,
   Group,
+  type Mesh,
   Vector3,
   type DataTexture,
 } from 'three/webgpu'
 import { CSMShadowNode } from 'three/addons/csm/CSMShadowNode.js'
 import { LENS_WORLD, type Subject } from '../../bench/geometry'
 import type { WorldSource } from '../WorldSource'
-import { ambientCgSet, loadHdr, polyHavenSet } from './assets'
+import { ambientCgSet, loadGltf, loadHdr, polyHavenSet } from './assets'
+import { createHeroes } from './heroes'
+import { adoptGltf } from './materials'
+import { createUndergrowth } from './undergrowth'
 import { createTerrain } from './terrain'
-import { createTrees } from './trees'
+import { createTrees, placeTrees } from './trees'
 import { forestAtmosphere } from './atmosphere'
+import { sunDirection } from './translucency'
 
 /**
  * The procedural forest: life-size, seen from a low tripod, lit by a
@@ -82,13 +87,15 @@ function halfToFloat(h: number): number {
 }
 
 export async function createForest(): Promise<WorldSource> {
-  const [hdr, litterA, litterB, moss, bark, leaves] = await Promise.all([
+  const [hdr, litterA, litterB, moss, bark, leaves, fern, deadTrunk] = await Promise.all([
     loadHdr('polyhaven/river_walk_1/river_walk_1_4k.hdr'),
     polyHavenSet('forest_leaves_02', 'diffuse'),
     polyHavenSet('leaves_forest_ground'),
     ambientCgSet('Moss002'),
     polyHavenSet('bark_brown_01'),
     ambientCgSet('LeafSet024'),
+    loadGltf('polyhaven/fern_02/fern_02_2k.gltf'),
+    loadGltf('polyhaven/dead_tree_trunk/dead_tree_trunk_2k.gltf'),
   ])
   hdr.mapping = EquirectangularReflectionMapping
   // Rotate the environment so its sun sits in front of the camera, a little left.
@@ -102,10 +109,19 @@ export async function createForest(): Promise<WorldSource> {
   const sunDir = new Vector3(Math.sin(SUN_AZIMUTH) * Math.cos(elevation), Math.sin(elevation), -Math.cos(SUN_AZIMUTH) * Math.cos(elevation))
 
   const atmosphere = forestAtmosphere(sunDir, hdr, rotation)
+  sunDirection.value.copy(sunDir)
   const root = new Group()
   root.name = 'forest'
   root.add(createTerrain(litterA, litterB, moss))
-  root.add(createTrees(bark, moss, leaves))
+  const trees = placeTrees(1234, sunDir)
+  root.add(createTrees(bark, moss, leaves, trees))
+  // The fern model holds four variants side by side on a 1 m grid.
+  adoptGltf(fern, 0.9)
+  adoptGltf(deadTrunk)
+  const ferns = ['a', 'b', 'c', 'd'].map((v) => fern.getObjectByName(`fern_02_${v}`) as Mesh)
+  const heroes = createHeroes(bark, moss, ferns[1], deadTrunk)
+  root.add(heroes.group)
+  root.add(createUndergrowth(ferns, trees))
 
   const sun = new DirectionalLight(0xffd2a1, 5)
   sun.position.copy(sunDir).multiplyScalar(200)
@@ -121,12 +137,13 @@ export async function createForest(): Promise<WorldSource> {
     name,
     position: { x: LENS_WORLD.x + x, y: LENS_WORLD.y + y, z: LENS_WORLD.z - d },
   })
-  const subjects = [at('log edge', -0.06, -0.04, 0.35), at('trunk', -0.3, 0.2, 3), at('far tree', 3, 4, 40)]
+  const far = at('far tree', 3, 4, 40)
+  const subjects = [...heroes.subjects, far]
 
   return {
     root,
     subjects,
-    far: subjects[2],
+    far,
     presets: [
       { name: 'Foreground', distanceM: 0.35 },
       { name: 'Middle', distanceM: 3 },
