@@ -322,6 +322,8 @@ export async function createRenderer(
           aperture: optics.aperture,
           tanW: 18 / optics.si,
           tanH: 12 / optics.si,
+          cocScalePx: blurUniforms(optics, W).cocScalePx,
+          samples: ex.target,
         },
         ex.samples,
         n,

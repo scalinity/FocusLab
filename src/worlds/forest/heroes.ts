@@ -224,27 +224,33 @@ export function createHeroes(bark: PbrSet, moss: PbrSet, fern: Mesh, deadTrunk: 
   heroFern.rotation.y = 2.4
   group.add(heroFern)
 
-  // Dew on the fronds that cross the frame: tiny mirror-smooth spheres whose sun
-  // glints become bokeh.
+  // Dew on the fronds that cross the frame. Seen against the sun, a drop
+  // refracts it towards the lens and shows as a bright point (the sparkle of
+  // dew in backlight), shadowed like any direct light; defocused, the points
+  // become bokeh.
   heroFern.updateMatrixWorld(true)
-  const drops: Vector3[] = []
+  // Candidates: frond vertices inside the 50 mm frame (36 × 24 mm at 50 mm).
+  const candidates: Vector3[] = []
   heroFern.traverse((o) => {
     if (!(o instanceof Mesh)) return
     const p = o.geometry.getAttribute('position')
     const nrm = o.geometry.getAttribute('normal')
     const w = new Vector3()
     const nw = new Vector3()
-    for (let i = 0; i < p.count && drops.length < 48; i += 37) {
+    for (let i = 0; i < p.count; i++) {
       w.fromBufferAttribute(p, i).applyMatrix4(o.matrixWorld)
       const d = L.z - w.z
       if (d < 0.6 || d > 1.05) continue
-      if (Math.abs(w.x - L.x) > d * 0.3 || Math.abs(w.y - L.y) > d * 0.2) continue
+      if (Math.abs(w.x - L.x) > d * 0.36 || Math.abs(w.y - L.y) > d * 0.24) continue
       nw.fromBufferAttribute(nrm, i).transformDirection(o.matrixWorld)
-      drops.push(w.clone().addScaledVector(nw, 0.002))
+      candidates.push(w.clone().addScaledVector(nw, 0.002))
     }
   })
-  const dropMat = new MeshStandardNodeMaterial({ color: 0x0a0d0c, roughness: 0.03, metalness: 0 })
+  const drops = Array.from({ length: Math.min(48, candidates.length) }, () => candidates.splice(Math.floor(rand() * candidates.length), 1)[0])
+  const dropMat = new MeshSSSNodeMaterial({ color: 0x0a0d0c, roughness: 0.03, metalness: 0 })
   dropMat.emissiveNode = focusContour()
+  makeTranslucent(dropMat, vec3(1), 30)
+  console.info(`[forest] dew: ${drops.length} drops`)
   const dews = new InstancedMesh(new SphereGeometry(1, 12, 8), dropMat, drops.length)
   drops.forEach((p, i) => dews.setMatrixAt(i, new Matrix4().compose(p, new Quaternion(), new Vector3().setScalar(0.0014 + rand() * 0.0012))))
   group.add(dews)

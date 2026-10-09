@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CIRCULAR, apertureRadius, sampleAperture, type Aperture } from './aperture'
-import { halton, r2 } from './sequence'
+import { fibonacci, halton, r2 } from './sequence'
 import { addSamples, exposeNow, initialExposure, onInput, tick } from '../state/renderState'
 import { measureDisc } from '../render/measure'
 
@@ -17,6 +17,38 @@ describe('low-discrepancy sequences', () => {
       cells.add(Math.floor(x * 16) * 16 + Math.floor(y * 16))
     }
     expect(cells.size).toBeGreaterThan(0.6 * n)
+  })
+
+  it('the Fibonacci lattice in bit-reversed order is stratified for every power-of-two prefix', () => {
+    const n = 256
+    for (const prefix of [16, 64, n]) {
+      const strata = new Set<number>()
+      for (let i = 0; i < prefix; i++) strata.add(Math.floor(fibonacci(i, n)[1] * prefix))
+      expect(strata.size).toBe(prefix)
+    }
+  })
+
+  it('the Fibonacci lattice leaves no gap on the disc wider than about one cell, unlike R2', () => {
+    // Largest distance from any point of the unit disc to its nearest sample,
+    // against the radius of an equal-area cell, 1/√n.
+    const n = 256
+    const cover = (u: (i: number) => [number, number]) => {
+      const pts = Array.from({ length: n }, (_, i) => sampleAperture(CIRCULAR, ...u(i)))
+      let worst = 0
+      for (let gy = -0.95; gy <= 0.95; gy += 0.01) {
+        for (let gx = -0.95; gx <= 0.95; gx += 0.01) {
+          if (gx * gx + gy * gy > 0.9) continue
+          let best = Infinity
+          for (const [x, y] of pts) best = Math.min(best, Math.hypot(x - gx, y - gy))
+          worst = Math.max(worst, best)
+        }
+      }
+      return worst * Math.sqrt(n)
+    }
+    const fib = cover((i) => fibonacci(i, n))
+    // Measured at n = 256: Fibonacci 1.33 cells, R2 2.30.
+    expect(fib).toBeLessThan(1.4)
+    expect(fib).toBeLessThan(0.7 * cover(r2))
   })
 })
 

@@ -100,10 +100,23 @@ Specs state the current design; this file is where the reasons live.
 
 ## Exact exposure (M2)
 
-- **Sampling:** aperture positions from Roberts' R2 sequence mapped area-uniformly onto the iris
-  (angle from the R(φ)² distribution, radius R(φ)·√u); sub-pixel jitter from Halton(2,3). Two
-  different constructions keep the aperture and jitter samples decorrelated, and every prefix
-  of either is well spread, so the image is presentable at any sample count.
+- **Sampling:** aperture positions are a Fibonacci lattice for the exposure's sample count,
+  mapped area-uniformly onto the iris (angle from the R(φ)² distribution, radius R(φ)·√u); on a
+  circular iris that is Vogel's sunflower. They are taken in bit-reversed order, so every
+  power-of-two prefix is a coarser copy of the set and the image is presentable at any count
+  (the tiers, 128/256/512, are powers of two). Sub-pixel jitter is Halton(3,5): bit-reversed
+  order is the base-2 radical inverse and would correlate with Halton base 2.
+- **Why not R2 for the aperture:** a point source shows the sample set itself wherever its blur
+  is wider than the samples are apart. R2 is a rank-1 lattice and at 256 points one family of
+  its lines is widely spaced: the largest gap on the disc is 2.30 equal-area cells, against 1.33
+  for the Fibonacci lattice (`sampling.test.ts`). Dew bokeh showed R2's lines as pinwheel arms.
+- **Aperture cells:** each sample stands for a cell of the aperture, so each pass is blurred by
+  that cell's share of the blur, radius 1.5·|c|/(2√N) (1.5 equal-area cells, past the lattice's
+  largest gap), up to 8 px: a 24-tap gather turned every pass, where a sample spreads over
+  farther surfaces and over nearer ones only within their own cell. It is zero on the plane of
+  focus and vanishes as N grows, so the exposure converges to the same integral; at 256 samples
+  it closes the gaps between a dew drop's 256 images into a smooth disc. M2 discs: 11.17–11.53 px
+  (circle), 11.50 (pentagon), 11.40 (hexagon).
 - **Accumulation** is a compute pass adding each sample into an `array<vec4<f32>>` storage
   buffer (the first sample assigns instead of adding, so no clear pass); float32 blending and
   filtering are never used. A resolve pass divides by the count and crossfades from the live
@@ -120,6 +133,9 @@ Specs state the current design; this file is where the reasons live.
   speckle. The disc is measured by energy (total ÷ interior level), which is exact for any
   emitter that leaves a flat interior. Pentagon orientation is measured with the 5th complex
   moment, because a 5-fold symmetric shape has no skew.
+- **Device-loss check:** the loss is handled asynchronously, so until the handler runs the
+  harness still sees the destroyed device and the first start's `ready`; the check waits for a
+  device that differs from the destroyed one.
 - Exposure is a fixed multiplier until the exposure chain lands with the forest (M4). Scene
   time and shadow maps must freeze while exposing once the world animates.
 
@@ -159,9 +175,14 @@ Specs state the current design; this file is where the reasons live.
   image.
 - **Gather sampling:** 64 of a 256-point R2 pool, each pixel reading its own window (shape kept,
   structured undersampling turned into fine noise), then an alpha-weighted 3×3 fill.
-- **Highlights:** the part of a blurred field above linear luminance 8 is scattered when its
-  blur is at least 4 px; the gathered part is clamped to that level, so no light is counted
-  twice. Sprite intensity is energy ÷ area of the area-equivalent disc.
+- **Highlights:** a blurred field texel (blur ≥ 4 px) is a highlight when its luminance is above
+  1.5 and twice its surroundings', measured on a 16-tap circle of 12 full-res px around it,
+  about the gather's sample spacing at its largest kernel. Everything above the surroundings'
+  level is scattered as a sprite; the gather keeps only that level, so no light is counted
+  twice. A highlight much brighter than its surroundings left in the gather shows the kernel's
+  sample pattern (dew bokeh came out as pinwheels); a uniformly bright region (open sky) sees
+  itself on the circle and stays in the gather. Cost in the forest: +1.5 ms full-screen while
+  pulling focus. Sprite intensity is energy ÷ area of the area-equivalent disc.
 - **Kernel cap:** 32 half-res px = 64 full-res px radius (a 128 px blur circle). Beyond that the
   live view understates blur; the exact exposure has no cap.
 - **Temporal stabilisation is deferred to M4**, where the first moving content (wind) arrives;

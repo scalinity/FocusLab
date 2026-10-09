@@ -78,9 +78,9 @@ import { fxaa } from 'three/addons/tsl/display/FXAANode.js'
  *
  * Shapes follow refinement 4: a point's blur in the photo is the aperture
  * upright in the far field and rotated 180° in the near field. Bright pixels
- * with a large CoC are split: the part above HIGHLIGHT is scattered as
- * sprites with energy conserved, the rest is gathered, so no light is
- * counted twice.
+ * with a large CoC, clearly brighter than their surroundings, are split: the
+ * part above the surroundings' level is scattered as sprites with energy
+ * conserved, the rest is gathered, so no light is counted twice.
  *
  * Kernel cap: MAX_RADIUS_HALF half-res px = 64 full-res px radius (a 128 px
  * blur circle). Larger blurs are clamped here; the exact path has no cap.
@@ -95,8 +95,10 @@ const KERNEL = 64
 const KERNEL_POOL = 256
 const MAX_RADIUS_HALF = 32
 const TILE = 8
-/** Linear luminance above which a blurred pixel's excess is scattered as a sprite. */
-const HIGHLIGHT = 8
+/** Linear luminance above which a blurred pixel is a highlight candidate for a sprite. */
+const HIGHLIGHT = 1.5
+/** Radius (full-res px) at which a highlight's surroundings are measured. */
+const SURROUNDINGS = 12
 /** Smallest blur (diameter, full-res px) that gets scattered; below it highlights stay in the gather. */
 const SCATTER_MIN_COC = 4
 const MAX_SPRITES = 1 << 16
@@ -127,13 +129,24 @@ type V4 = Node<'vec4'>
 const luminance = (c: V3): F => c.dot(vec3(0.2126, 0.7152, 0.0722))
 
 /**
- * Premultiplied field colour without the part that is scattered as a
- * highlight sprite. `c` is the field's CoC, positive far, negative near.
+ * Whether a field texel's light above its surroundings' level is scattered as a
+ * sprite: a blurred highlight clearly brighter than what surrounds it. `c` is
+ * the field's CoC, positive far, negative near; `level` the surroundings'
+ * luminance (COC.b).
  */
-function gatherable(prem: V4, c: F): V3 {
+const scatters = (l: F, c: F, level: F) =>
+  abs(c).greaterThanEqual(SCATTER_MIN_COC).and(l.greaterThan(max(float(HIGHLIGHT), level.mul(2))))
+
+/**
+ * Premultiplied field colour without the part that is scattered as a
+ * highlight sprite. A highlight keeps only its surroundings' level in the
+ * gather: the gather samples a large blur sparsely, so a texel much brighter
+ * than its neighbours would show the sample pattern (pinwheels in dew bokeh);
+ * as a sprite its light spreads exactly.
+ */
+function gatherable(prem: V4, c: F, level: F): V3 {
   const l = luminance(prem.rgb.div(max(prem.a, 1e-4)))
-  const scattered = abs(c).greaterThanEqual(SCATTER_MIN_COC).and(l.greaterThan(HIGHLIGHT))
-  return select(scattered, prem.rgb.mul(float(HIGHLIGHT).div(l)), prem.rgb)
+  return select(scatters(l, c, level), prem.rgb.mul(level.div(l)), prem.rgb)
 }
 
 export function createLiveDof(renderer: WebGPURenderer): LiveDof {
@@ -205,12 +218,25 @@ export function createLiveDof(renderer: WebGPURenderer): LiveDof {
   // spreads, so it follows the surface the energy comes from.
   const fieldCoc = (wOf: (t: (typeof taps)[number]) => F): F =>
     sum1((t) => t.c.mul(wOf(t)).mul(t.l)).div(sum1((t) => wOf(t).mul(t.l)).max(1e-6))
+  // Surroundings' luminance: 16 taps on a circle of SURROUNDINGS full-res px
+  // around the block, about the gather's sample spacing at its largest kernel
+  // (R·√(π/KERNEL) half-res px). A highlight smaller than that is what the
+  // gather undersamples; the circle passes outside it, so it does not raise
+  // its own level, while a uniformly bright region (sky) sees itself.
+  const ring = Array.from({ length: 16 }, (_, i) => [Math.cos((i / 16) * 2 * Math.PI), Math.sin((i / 16) * 2 * Math.PI)])
+  const surroundings = ring
+    .map(([dx, dy]) => {
+      const q = ivec2(vec2(screenCoordinate.xy).mul(2).add(vec2(dx, dy).mul(SURROUNDINGS)).clamp(vec2(0), fullSize.sub(1)))
+      return luminance(textureLoad(sceneRT.textures[0], q).rgb)
+    })
+    .reduce((a, b) => a.add(b))
+    .div(ring.length)
   // Material-level MRT: a NodeMaterial with a fragmentNode ignores MRT entirely (r186).
   prefilterMat.mrtNode = mrt({
     output: fieldOut((t) => t.wf),
     near: fieldOut((t) => t.wn),
     focus: fieldOut((t) => t.wi),
-    coc: vec4(fieldCoc((t) => t.wf), fieldCoc((t) => t.wn), 0, 1),
+    coc: vec4(fieldCoc((t) => t.wf), fieldCoc((t) => t.wn), surroundings, 1),
   })
   const prefilterQuad = new QuadMesh(prefilterMat)
 
@@ -312,11 +338,12 @@ export function createLiveDof(renderer: WebGPURenderer): LiveDof {
           // Far field: the aperture upright in the photo means offsets in −Shape.
           const o = u.xy.negate().mul(R)
           const s = tap(FAR, pix, o)
-          const sc = tap(COC, pix, o).r
+          const sCoc = tap(COC, pix, o)
+          const sc = sCoc.r
           const rs = sc.div(4).min(MAX_RADIUS_HALF)
           const r = select(sc.greaterThan(cc), min(rs, rc), rs)
           const wgt = r.sub(R.mul(u.z)).add(0.5).clamp(0, 1).div(max(r.mul(r), 0.25))
-          sum.addAssign(gatherable(s, sc).mul(wgt))
+          sum.addAssign(gatherable(s, sc, sCoc.b).mul(wgt))
           cov.addAssign(s.a.mul(wgt))
         })
         If(cov.greaterThan(1e-6), () => result.assign(vec4(sum.div(cov), 1)))
@@ -336,7 +363,7 @@ export function createLiveDof(renderer: WebGPURenderer): LiveDof {
             const near = tap(NEAR, pix, o)
             const coc = tap(COC, pix, o)
             const behind = select(coc.g.greaterThan(cn.add(2)), float(1), float(0))
-            sum.addAssign(gatherable(far, coc.r).add(focus.rgb).add(gatherable(near, coc.g).mul(behind)))
+            sum.addAssign(gatherable(far, coc.r, coc.b).add(focus.rgb).add(gatherable(near, coc.g, coc.b).mul(behind)))
             cov.addAssign(far.a.add(focus.a).add(near.a.mul(behind)))
           })
           If(cov.greaterThan(1e-3), () => result.assign(vec4(sum.div(cov), 1)))
@@ -365,10 +392,11 @@ export function createLiveDof(renderer: WebGPURenderer): LiveDof {
           // Near field: the aperture rotated 180° in the photo means offsets in +Shape.
           const o = u.xy.mul(R)
           const s = tap(NEAR, pix, o)
-          const sc = tap(COC, pix, o).g
+          const sCoc = tap(COC, pix, o)
+          const sc = sCoc.g
           const r = sc.negate().div(4).min(MAX_RADIUS_HALF)
           const wgt = r.sub(R.mul(u.z)).add(0.5).clamp(0, 1).div(max(r.mul(r), 0.25))
-          sum.addAssign(gatherable(s, sc).mul(wgt))
+          sum.addAssign(gatherable(s, sc, sCoc.b).mul(wgt))
           cov.addAssign(s.a.mul(wgt))
         })
         result.assign(vec4(sum.div(max(cov, 1e-6)), cov.mul(R.mul(R)).div(float(n)).clamp(0, 1)))
@@ -429,12 +457,12 @@ export function createLiveDof(renderer: WebGPURenderer): LiveDof {
       ] as const) {
         const s = textureLoad(fieldsRT.textures[field], q)
         const l = luminance(s.rgb.div(max(s.a, 1e-4)))
-        If(abs(c).greaterThanEqual(SCATTER_MIN_COC).and(l.greaterThan(HIGHLIGHT)).and(s.a.greaterThan(1e-3)), () => {
+        If(scatters(l, c, coc.b).and(s.a.greaterThan(1e-3)), () => {
           const slot = atomicAdd(argsNode.element(1), uint(1))
           If(slot.lessThan(uint(MAX_SPRITES)), () => {
             // Centre in full-res px (y down), signed radius, energy of the field's
-            // share of the 2×2 block above the highlight level.
-            const excess = s.rgb.mul(float(1).sub(float(HIGHLIGHT).div(l))).mul(4)
+            // share of the 2×2 block above its surroundings' level.
+            const excess = s.rgb.mul(float(1).sub(coc.b.div(l))).mul(4)
             spriteData.element(slot.mul(2)).assign(vec4(vec2(q).add(0.5).mul(2), c.mul(0.5), 0))
             spriteData.element(slot.mul(2).add(1)).assign(vec4(excess, 0))
           })
