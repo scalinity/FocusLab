@@ -72,7 +72,13 @@ export async function openApp(query = ''): Promise<App> {
     if (a.fallback !== false) fail(`adapter isFallbackAdapter = ${a.fallback}`)
     if (ident.includes('swiftshader')) fail(`software adapter: ${ident}`)
 
-    const report = await page.evaluate(() => window.__focusLab?.ready ?? Promise.reject(new Error('no harness hook')))
+    // Worlds load assets before the app starts, so wait for the hook to appear.
+    try {
+      await page.waitForFunction(() => window.__focusLab !== undefined, null, { timeout: 120000 })
+    } catch {
+      fail(`the app never started:\n  ${logs.join('\n  ')}`)
+    }
+    const report = await page.evaluate(() => window.__focusLab!.ready)
     if (report.backend !== 'webgpu') fail(`app backend is ${report.backend}`)
     return { page, logs, adapter: ident, close }
   } catch (err) {

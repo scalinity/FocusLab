@@ -40,6 +40,7 @@ import { store } from '../state/store'
 import type { Hud, LabelPositions } from '../ui/hud'
 import type { WorldSource } from '../worlds/WorldSource'
 import { createExposureEngine } from './exposure'
+import { createViewfinderPost } from './post'
 import { createLiveDof } from './dofLive'
 import { contour } from './focusContour'
 import { viewfinderRect } from './layout'
@@ -112,6 +113,8 @@ const SAMPLE_BUDGET_MS = 12
 const MAX_SAMPLES_PER_FRAME = 48
 /** Crossfade from the live frame once this many samples exist, complete at twice that. */
 const FADE_FROM = 16
+/** Linear exposure of the viewfinder before tone mapping (aperture priority keeps it constant). */
+const VIEWFINDER_EXPOSURE = 0.6
 
 export async function createRenderer(
   canvas: HTMLCanvasElement,
@@ -121,13 +124,26 @@ export async function createRenderer(
 ): Promise<FocusRenderer> {
   const renderer = new WebGPURenderer({ canvas, device: gpu.device, alpha: false, antialias: false, trackTimestamp: true })
   renderer.setClearColor(new Color(0x0b0f1a), 1)
+  renderer.shadowMap.enabled = true
   await renderer.init()
   if ((renderer.backend as { isWebGPUBackend?: boolean }).isWebGPUBackend !== true) {
     throw new WebGPUUnavailable('three.js did not start its WebGPU backend.')
   }
 
   const scene = new Scene()
-  scene.backgroundNode = world.background ?? skyNode()
+  if (world.environment) {
+    scene.environment = world.environment
+    scene.environmentRotation.y = world.environmentRotation ?? 0
+  }
+  if (world.background) {
+    scene.backgroundNode = world.background
+  } else if (world.environment) {
+    scene.background = world.environment
+    scene.backgroundRotation.y = world.environmentRotation ?? 0
+  } else {
+    scene.backgroundNode = skyNode()
+  }
+  if (world.fog) scene.fogNode = world.fog
   scene.add(world.root)
 
   const pmrem = new PMREMGenerator(renderer)
@@ -173,10 +189,9 @@ export async function createRenderer(
   blitPipeline.outputColorTransform = false
   blitPipeline.outputNode = texture(benchOut.texture)
 
-  // Viewfinder card: the HDR image, tone mapped once, at its own pixels.
-  const cardPipeline = new RenderPipeline(renderer)
-  cardPipeline.outputColorTransform = false
-  cardPipeline.outputNode = renderOutput(texture(exposure.image.texture), AgXToneMapping, SRGBColorSpace)
+  // Viewfinder card: the HDR image through the photographic finish, at its own pixels.
+  const post = createViewfinderPost(renderer, exposure.image.texture)
+  const cardPipeline = post.pipeline
 
   let ex = initialExposure(performance.now(), TIER_SAMPLES[store.get().ui.tier])
   let photoKey = ''
@@ -280,6 +295,10 @@ export async function createRenderer(
     if (!benchDirty && !frameDirty && ex.mode !== 'EXPOSING') return
 
     hud.placeViewfinder(rect)
+    post.si.value = optics.si
+    post.N.value = optics.N
+    post.exposure.value = VIEWFINDER_EXPOSURE
+    if (ex.mode !== 'DEVELOPED') post.grainSeed.value = Math.random() * 100
     vfCamera.fov = MathUtils.radToDeg(derived.vfov)
     vfCamera.updateProjectionMatrix()
     contour.lens.value.copy(vfCamera.position)

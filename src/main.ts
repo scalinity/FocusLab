@@ -11,6 +11,8 @@ import { showFatal } from './ui/fatal'
 import { createTestCards } from './worlds/testCards'
 import { createPointTargets } from './worlds/pointTargets'
 import { createHaloTargets } from './worlds/haloTargets'
+import { createForest } from './worlds/forest'
+import type { WorldSource } from './worlds/WorldSource'
 import { measureDisc, type DiscMeasure } from './render/measure'
 
 const canvas = document.getElementById('view') as HTMLCanvasElement
@@ -61,7 +63,13 @@ let unbind: (() => void) | null = null
 // bundled fonts so they use them.
 await Promise.all([document.fonts.load('600 46px "Outfit Variable"'), document.fonts.load('500 30px "DM Mono"')])
 const worldName = new URLSearchParams(location.search).get('world')
-const world = worldName === 'points' ? createPointTargets() : worldName === 'halo' ? createHaloTargets() : createTestCards()
+const WORLDS: Record<string, () => WorldSource | Promise<WorldSource>> = {
+  points: createPointTargets,
+  halo: createHaloTargets,
+  cards: createTestCards,
+  forest: createForest,
+}
+const world = await (WORLDS[worldName ?? 'forest'] ?? createForest)()
 const hud = createHud(world)
 
 /**
